@@ -1,0 +1,345 @@
+//! A deliberately narrow, source-local preview profile. Not an authority boundary.
+use std::collections::BTreeSet;
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
+use bumpalo::Bump;
+use cityos_zen_contracts::{PolicyError, MAX_DOCUMENT_BYTES, MAX_SAFE_INTEGER};
+use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use serde_json::{json, Map, Number, Value};
+use sha2::{Digest, Sha256};
+use zen_engine::loader::{DecisionLoader, LoaderError, LoaderResponse};
+use zen_engine::model::DecisionContent;
+use zen_engine::policy::{PolicyDocument, PolicyWorkspace};
+use zen_engine::DecisionEngine;
+use zen_expression::lexer::{ComparisonOperator, Lexer, LogicalOperator, Operator, TokenKind};
+use zen_expression::parser::{Node, Parser};
+
+/// Only this crate can construct an admitted preview document.
+#[derive(Clone)]
+pub struct AdmittedPreview {
+    document: PolicyDocument,
+    source_sha256: String,
+}
+
+impl AdmittedPreview {
+    pub fn document(&self) -> &PolicyDocument {
+        &self.document
+    }
+    pub fn source_sha256(&self) -> &str {
+        &self.source_sha256
+    }
+}
+
+/// The first profile admits exactly one entry and no imports or live fallback.
+#[derive(Debug)]
+struct ImmutableLoader {
+    content: Arc<DecisionContent>,
+    synchronous_reads: AtomicUsize,
+    dynamic_reads: AtomicUsize,
+}
+
+impl DecisionLoader for ImmutableLoader {
+    fn load<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = LoaderResponse> + 'a + Send>> {
+        self.dynamic_reads.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async move { Err(LoaderError::NotFound(key.to_owned())) })
+    }
+
+    fn keys(&self) -> Option<Vec<Arc<str>>> {
+        Some(vec![Arc::from("cart")])
+    }
+
+    fn load_sync(&self, key: &str) -> Option<LoaderResponse> {
+        self.synchronous_reads.fetch_add(1, Ordering::Relaxed);
+        Some(if key == "cart" {
+            Ok(Arc::clone(&self.content))
+        } else {
+            Err(LoaderError::NotFound(key.to_owned()))
+        })
+    }
+}
+
+// Deserialize before Value creation so duplicate keys and imprecise numbers cannot disappear.
+struct Unique(Value);
+impl<'de> Deserialize<'de> for Unique {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct UniqueVisitor;
+        impl<'de> Visitor<'de> for UniqueVisitor {
+            type Value = Unique;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON value with unique keys and safe integer numbers")
+            }
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Unique, E> {
+                Ok(Unique(Value::Bool(value)))
+            }
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Unique, E> {
+                if value.unsigned_abs() > MAX_SAFE_INTEGER {
+                    return Err(E::custom("unsafe integer"));
+                }
+                Ok(Unique(Value::Number(Number::from(value))))
+            }
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Unique, E> {
+                if value > MAX_SAFE_INTEGER {
+                    return Err(E::custom("unsafe integer"));
+                }
+                Ok(Unique(Value::Number(Number::from(value))))
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Unique, E> {
+                Err(E::custom("fractional and exponent numbers are unsupported"))
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Unique, E> {
+                Ok(Unique(Value::String(value.to_owned())))
+            }
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Unique, E> {
+                Ok(Unique(Value::String(value)))
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Unique, E> {
+                Ok(Unique(Value::Null))
+            }
+            fn visit_none<E: serde::de::Error>(self) -> Result<Unique, E> {
+                Ok(Unique(Value::Null))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Unique, A::Error> {
+                let mut values = Vec::new();
+                while let Some(Unique(value)) = seq.next_element()? {
+                    values.push(value);
+                }
+                Ok(Unique(Value::Array(values)))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Unique, A::Error> {
+                let mut values = Map::new();
+                while let Some((key, Unique(value))) = map.next_entry::<String, Unique>()? {
+                    if values.insert(key, value).is_some() {
+                        return Err(serde::de::Error::custom("duplicate key"));
+                    }
+                }
+                Ok(Unique(Value::Object(values)))
+            }
+        }
+        deserializer.deserialize_any(UniqueVisitor)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ty {
+    Boolean,
+    Integer,
+}
+
+fn expression_type(node: &Node<'_>, depth: usize) -> Result<Ty, PolicyError> {
+    if depth > 32 {
+        return Err(PolicyError::Unsupported);
+    }
+    match node {
+        Node::Bool(_) => Ok(Ty::Boolean),
+        Node::Number(value) => {
+            let text = value.to_string();
+            let n = text.parse::<i64>().map_err(|_| PolicyError::Unsupported)?;
+            if n.unsigned_abs() > MAX_SAFE_INTEGER {
+                return Err(PolicyError::Unsupported);
+            }
+            Ok(Ty::Integer)
+        }
+        Node::Parenthesized(inner) => expression_type(inner, depth + 1),
+        Node::Member { node, property } => match (&**node, &**property) {
+            (Node::Identifier("cart"), Node::String("quantity" | "maxQuantity")) => Ok(Ty::Integer),
+            (Node::Identifier("cart"), Node::String("authorized")) => Ok(Ty::Boolean),
+            _ => Err(PolicyError::Unsupported),
+        },
+        Node::Unary {
+            node,
+            operator: Operator::Logical(LogicalOperator::Not),
+        } if expression_type(node, depth + 1)? == Ty::Boolean => Ok(Ty::Boolean),
+        Node::Binary {
+            left,
+            right,
+            operator,
+        } => {
+            let left = expression_type(left, depth + 1)?;
+            let right = expression_type(right, depth + 1)?;
+            match operator {
+                Operator::Logical(LogicalOperator::And | LogicalOperator::Or)
+                    if left == Ty::Boolean && right == Ty::Boolean =>
+                {
+                    Ok(Ty::Boolean)
+                }
+                Operator::Comparison(ComparisonOperator::Equal | ComparisonOperator::NotEqual)
+                    if left == right =>
+                {
+                    Ok(Ty::Boolean)
+                }
+                Operator::Comparison(
+                    ComparisonOperator::LessThan
+                    | ComparisonOperator::LessThanOrEqual
+                    | ComparisonOperator::GreaterThan
+                    | ComparisonOperator::GreaterThanOrEqual,
+                ) if left == Ty::Integer && right == Ty::Integer => Ok(Ty::Boolean),
+                _ => Err(PolicyError::Unsupported),
+            }
+        }
+        _ => Err(PolicyError::Unsupported),
+    }
+}
+
+fn validate_expression(source: &str) -> Result<(), PolicyError> {
+    if source.is_empty() || source.len() > 4096 {
+        return Err(PolicyError::Unsupported);
+    }
+    let bump = Bump::new();
+    let mut lexer = Lexer::new();
+    let tokens = lexer
+        .tokenize(&bump, source)
+        .map_err(|_| PolicyError::Unsupported)?;
+    if tokens.iter().any(|token| {
+        token.kind == TokenKind::Number
+            && (!token.value.chars().all(|c| c.is_ascii_digit())
+                || (token.value.len() > 1 && token.value.starts_with('0')))
+    }) {
+        return Err(PolicyError::Unsupported);
+    }
+    let parser = Parser::try_new(&tokens, &bump)
+        .map_err(|_| PolicyError::Unsupported)?
+        .standard();
+    let parsed = parser.parse();
+    parsed.error().map_err(|_| PolicyError::Unsupported)?;
+    if expression_type(parsed.root, 0)? != Ty::Boolean {
+        return Err(PolicyError::Unsupported);
+    }
+    zen_expression::compile_expression(source).map_err(|_| PolicyError::Compile)?;
+    Ok(())
+}
+
+/// Admit a single fixed-shape policy document for synthetic cart previews.
+/// No imports, computed fact acquisition or authorizing receipt are supported.
+pub fn admit(source: &[u8]) -> Result<AdmittedPreview, PolicyError> {
+    if source.len() > MAX_DOCUMENT_BYTES {
+        return Err(PolicyError::InvalidSource);
+    }
+    let mut decoder = serde_json::Deserializer::from_slice(source);
+    let Unique(value) =
+        Unique::deserialize(&mut decoder).map_err(|_| PolicyError::InvalidSource)?;
+    decoder.end().map_err(|_| PolicyError::InvalidSource)?;
+    let root = value.as_object().ok_or(PolicyError::InvalidSource)?;
+    if root.keys().any(|key| key != "blocks" && key != "imports") {
+        return Err(PolicyError::Unsupported);
+    }
+    if let Some(imports) = root.get("imports") {
+        if imports
+            .as_array()
+            .filter(|items| items.is_empty())
+            .is_none()
+        {
+            return Err(PolicyError::Unsupported);
+        }
+    }
+    let blocks = root
+        .get("blocks")
+        .and_then(Value::as_array)
+        .ok_or(PolicyError::InvalidSource)?;
+    if blocks.len() != 2 {
+        return Err(PolicyError::Unsupported);
+    }
+    let expected_model = json!({"id":"cart-model", "type":"dataModel", "props":{"data":{
+    "name":"cart", "properties":[
+        {"id":"quantity", "name":"quantity", "type":"number", "array":false, "optional":false},
+        {"id":"max", "name":"maxQuantity", "type":"number", "array":false, "optional":false},
+        {"id":"authorized", "name":"authorized", "type":"boolean", "array":false, "optional":false}
+    ]}}});
+    if blocks[0] != expected_model {
+        return Err(PolicyError::Unsupported);
+    }
+    let expression = blocks[1].as_object().ok_or(PolicyError::Unsupported)?;
+    if expression
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        != BTreeSet::from(["id", "props", "type"])
+        || expression.get("id").and_then(Value::as_str) != Some("cart-decision")
+        || expression.get("type").and_then(Value::as_str) != Some("expression")
+    {
+        return Err(PolicyError::Unsupported);
+    }
+    let props = expression
+        .get("props")
+        .and_then(Value::as_object)
+        .ok_or(PolicyError::Unsupported)?;
+    if props.len() != 1 {
+        return Err(PolicyError::Unsupported);
+    }
+    let data = props
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or(PolicyError::Unsupported)?;
+    if data.len() != 2 || data.get("key").and_then(Value::as_str) != Some("cart.allowed") {
+        return Err(PolicyError::Unsupported);
+    }
+    validate_expression(
+        data.get("value")
+            .and_then(Value::as_str)
+            .ok_or(PolicyError::Unsupported)?,
+    )?;
+    let document: PolicyDocument =
+        serde_json::from_value(value).map_err(|_| PolicyError::InvalidSource)?;
+    let mut workspace = PolicyWorkspace::new();
+    workspace.set_policy("cart", document.clone());
+    if !workspace.all_diagnostics().is_empty() {
+        return Err(PolicyError::Analysis);
+    }
+    let loader = Arc::new(ImmutableLoader {
+        content: Arc::new(DecisionContent::Policy(Arc::new(document.clone()).into())),
+        synchronous_reads: AtomicUsize::new(0),
+        dynamic_reads: AtomicUsize::new(0),
+    });
+    let engine = DecisionEngine::default().with_loader(loader.clone());
+    if !engine.compile().is_empty()
+        || loader.synchronous_reads.load(Ordering::Relaxed) == 0
+        || loader.dynamic_reads.load(Ordering::Relaxed) != 0
+    {
+        return Err(PolicyError::Compile);
+    }
+    Ok(AdmittedPreview {
+        document,
+        source_sha256: format!("{:x}", Sha256::digest(source)),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::task::{Context, Poll, Waker};
+
+    #[test]
+    fn immutable_loader_enumerates_and_never_falls_back() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let document: PolicyDocument =
+            serde_json::from_slice(include_bytes!("../../../corpus/cart-quantity-preview.json"))?;
+        let loader = ImmutableLoader {
+            content: Arc::new(DecisionContent::Policy(Arc::new(document).into())),
+            synchronous_reads: AtomicUsize::new(0),
+            dynamic_reads: AtomicUsize::new(0),
+        };
+        assert_eq!(loader.keys(), Some(vec![Arc::from("cart")]));
+        assert!(matches!(loader.load_sync("cart"), Some(Ok(_))));
+        assert!(matches!(
+            loader.load_sync("other"),
+            Some(Err(LoaderError::NotFound(_)))
+        ));
+        let mut future = loader.load("cart");
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            future.as_mut().poll(&mut context),
+            Poll::Ready(Err(LoaderError::NotFound(_)))
+        ));
+        assert_eq!(loader.dynamic_reads.load(Ordering::Relaxed), 1);
+        Ok(())
+    }
+}

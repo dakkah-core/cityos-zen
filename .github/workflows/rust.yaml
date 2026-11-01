@@ -2,7 +2,6 @@ name: Rust
 
 permissions:
   contents: read
-  id-token: write
 
 on:
   pull_request:
@@ -45,9 +44,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           shared-key: rust-test-${{ matrix.os }}
-          sccache-bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          sccache-region: ${{ secrets.SCCACHE_AWS_REGION }}
-          sccache-role-arn: ${{ secrets.SCCACHE_AWS_ROLE_ARN }}
+          sccache: 'false'
       - run: cargo test --workspace --all-features --exclude zen-ffi --exclude zen-nodejs --exclude zen-python --locked
       - name: Test without arbitrary_precision
         run: cargo test --workspace --exclude zen-ffi --exclude zen-nodejs --exclude zen-python --locked
@@ -65,7 +62,7 @@ jobs:
     name: Cargo Release
     runs-on: ubuntu-latest
     environment: release
-    if: "github.ref_type == 'tag'"
+    if: "github.repository == 'gorules/zen' && github.ref_type == 'tag'"
     needs:
       - test
       - fmt

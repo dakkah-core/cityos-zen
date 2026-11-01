@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/contracts", "crates/admission", "crates/runtime", "crates/worker", "crates/xtask"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+cityos-zen-contracts = { path = "crates/contracts" }
+cityos-zen-admission = { path = "crates/admission" }
+cityos-zen-runtime = { path = "crates/runtime" }
+zen-engine = { path = "../../core/engine" }
+zen-expression = { path = "../../core/expression" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bumpalo = { version = "3", features = ["collections"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"

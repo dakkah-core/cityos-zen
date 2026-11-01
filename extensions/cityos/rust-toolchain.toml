@@ -1,0 +1,7 @@
+# Projection of dakkah-cityos-cms rust/rust-toolchain.toml at
+# c7a3f7d1a56cb3a8abc6c090b5f4f175e086c140; verify against that owner before upgrades.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]

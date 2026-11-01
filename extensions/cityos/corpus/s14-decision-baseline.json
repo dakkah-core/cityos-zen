@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "cityos.zen.synthetic-s14-characterization.v1",
+  "source": {
+    "repository": "dakkah-cityos-cms",
+    "path": "packages/shared-policy-capability-pack-runtime-core/src/index.ts",
+    "gitBlob": "41ab12bb65db1b202142a219765e3f2eb1b94626",
+    "classification": "synthetic-source-local-characterization"
+  },
+  "baseInput": {
+    "request": {
+      "requestId": "req-1", "correlationId": "corr-1", "occurredAt": "2026-09-01T00:00:00.000Z",
+      "subject": {"subjectRef":"person:1","tenantId":"tenant-a","actorMode":"self","cellId":"sa-1"},
+      "resource": {"resourceType":"permit","resourceId":"permit-1"},
+      "action":"approve", "purpose":"operations", "policyVersion":"policy-v1"
+    },
+    "snapshot": {
+      "policyVersion":"policy-v1", "effectiveAt":"2026-09-01T00:00:00.000Z",
+      "rules":[{"ruleId":"allow-approve","effect":"allow","action":"approve","purpose":"operations","resourceType":"permit","reasonCode":"PERMIT_APPROVER"}]
+    },
+    "currentTime":"2026-09-01T00:01:00.000Z"
+  },
+  "cases": [
+    {"id":"explicit-allow","override":{},"expected":{"effect":"allow","reasonCodes":["PERMIT_APPROVER"],"matchedRuleIds":["allow-approve"]}},
+    {"id":"no-matching-allow","override":{"snapshot":{"rules":[]}},"expected":{"effect":"deny","reasonCodes":["NO_MATCHING_ALLOW"],"matchedRuleIds":[]}},
+    {"id":"explicit-deny-wins","override":{"snapshot":{"rules":[{"ruleId":"a","effect":"allow","reasonCode":"A"},{"ruleId":"d","effect":"deny","reasonCode":"D"}]}},"expected":{"effect":"deny","reasonCodes":["EXPLICIT_DENY"],"matchedRuleIds":["d"]}},
+    {"id":"consent-missing","override":{"snapshot":{"rules":[{"ruleId":"consent-rule","effect":"allow","requiresConsent":true,"reasonCode":"A"}]}},"expected":{"effect":"deny","reasonCodes":["CONSENT_NOT_GRANTED"],"matchedRuleIds":["consent-rule"]}},
+    {"id":"consent-granted","override":{"request":{"consent":{"consentRef":"consent-1","version":"v1","status":"granted","expiresAt":"2026-09-01T00:02:00.000Z"}},"snapshot":{"rules":[{"ruleId":"consent-rule","effect":"allow","requiresConsent":true,"reasonCode":"A"}]}},"expected":{"effect":"allow","reasonCodes":["A"],"matchedRuleIds":["consent-rule"]}},
+    {"id":"consent-revoked","override":{"request":{"consent":{"consentRef":"consent-1","version":"v1","status":"revoked"}},"snapshot":{"rules":[{"ruleId":"consent-rule","effect":"allow","requiresConsent":true,"reasonCode":"A"}]}},"expected":{"effect":"deny","reasonCodes":["CONSENT_NOT_GRANTED"],"matchedRuleIds":["consent-rule"]}},
+    {"id":"consent-expiry-boundary","override":{"request":{"consent":{"consentRef":"consent-1","version":"v1","status":"granted","expiresAt":"2026-09-01T00:01:00.000Z"}},"snapshot":{"rules":[{"ruleId":"consent-rule","effect":"allow","requiresConsent":true,"reasonCode":"A"}]}},"expected":{"effect":"deny","reasonCodes":["CONSENT_NOT_GRANTED"],"matchedRuleIds":["consent-rule"]}},
+    {"id":"legacy-invalid-consent-expiry","classification":"legacy-behavior-review-required","override":{"request":{"consent":{"consentRef":"consent-1","version":"v1","status":"granted","expiresAt":"not-a-date"}},"snapshot":{"rules":[{"ruleId":"consent-rule","effect":"allow","requiresConsent":true,"reasonCode":"A"}]}},"expected":{"effect":"allow","reasonCodes":["A"],"matchedRuleIds":["consent-rule"]}},
+    {"id":"stale-policy","override":{"request":{"policyVersion":"policy-v0"}},"expected":{"effect":"deny","reasonCodes":["STALE_POLICY_VERSION"],"matchedRuleIds":[]}},
+    {"id":"not-yet-effective","override":{"snapshot":{"effectiveAt":"2026-09-01T00:02:00.000Z"}},"expected":{"effect":"deny","reasonCodes":["POLICY_NOT_EFFECTIVE"],"matchedRuleIds":[]}},
+    {"id":"expiry-boundary","override":{"snapshot":{"expiresAt":"2026-09-01T00:01:00.000Z"}},"expected":{"effect":"deny","reasonCodes":["POLICY_EXPIRED"],"matchedRuleIds":[]}},
+    {"id":"missing-subject","override":{"request":{"subject":{"subjectRef":""}}},"expected":{"effect":"deny","reasonCodes":["MISSING_REQUIRED_CONTEXT"],"matchedRuleIds":[]}},
+    {"id":"invalid-clock","override":{"currentTime":"invalid"},"expected":{"effect":"deny","reasonCodes":["INVALID_TIME"],"matchedRuleIds":[]}}
+  ]
+}

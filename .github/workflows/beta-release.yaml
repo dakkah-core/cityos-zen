@@ -35,7 +35,7 @@ concurrency:
 jobs:
   beta:
     name: Tag beta
-    if: startsWith(github.ref, 'refs/heads/release/')
+    if: github.repository == 'gorules/zen' && startsWith(github.ref, 'refs/heads/release/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

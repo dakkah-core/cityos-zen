@@ -1,4 +1,7 @@
 name: Go
+
+permissions:
+  contents: read
 env:
   WORKING_DIRECTORY: bindings/c
   MACOSX_DEPLOYMENT_TARGET: '10.13'
@@ -14,8 +17,6 @@ on:
   push:
     tags:
       - 'go-v*'
-
-permissions: write-all
 
 jobs:
   build:
@@ -52,9 +53,7 @@ jobs:
         with:
           shared-key: go-${{ matrix.settings.target }}
           zig: ${{ matrix.settings.host == 'ubuntu-latest' }}
-          sccache-bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          sccache-region: ${{ secrets.SCCACHE_AWS_REGION }}
-          sccache-role-arn: ${{ secrets.SCCACHE_AWS_ROLE_ARN }}
+          sccache: 'false'
 
       - name: Build (zig, linux)
         if: ${{ matrix.settings.host == 'ubuntu-latest' && contains(matrix.settings.target, 'linux') }}
@@ -97,7 +96,7 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     environment: release
-    if: "github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'"
+    if: "github.repository == 'gorules/zen' && (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch')"
     needs:
       - build
       - copy-common

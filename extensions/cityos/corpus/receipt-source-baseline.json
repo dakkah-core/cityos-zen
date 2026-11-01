@@ -1,0 +1,19 @@
+{
+  "schemaVersion":"cityos.zen.synthetic-receipt-source-baseline.v1",
+  "classification":"source-inventory-not-wire-compatibility-proof",
+  "sources":[
+    {"path":"packages/shared-policy-application/src/operation-receipt.ts","gitBlob":"59ec507874dc4488343e4f350ece461eba0c2c72"},
+    {"path":"packages/shared-policy-application/tests/operation-receipt-fixture.ts","gitBlob":"862729df812ef908e57bd8001811e64a854ee28b"},
+    {"path":"packages/shared-policy-application/src/operation-receipt.test.ts","gitBlob":"efae5fb8dab13fa1740d6e93bdacc3fe408b2b40"},
+    {"path":"packages/shared-policy-application/src/operation-receipt-security.test.ts","gitBlob":"c4361ca50912e2ee86ed4528a772ac37c2c5700f"},
+    {"path":"packages/shared-platform-runtime-primitives/src/index.ts","gitBlob":"bc02cc3196c38204faffc6a11742a537a03df105"},
+    {"path":"packages/shared-policy-domain/src/operation-receipt-policy.ts","gitBlob":"a08780e49f6a3ecac6b4f31e356faa2b19fd06ca"},
+    {"path":"packages/shared-policy-domain/src/index.ts","gitBlob":"8fc6898d3d998520a6008f49666f003683a63df4"},
+    {"path":"packages/shared-policy-contracts/src/operation-receipt.ts","gitBlob":"6c4f06f5967628d6293977e9331c39c79b09921c"},
+    {"path":"packages/shared-policy-capability-pack-contracts/src/index.ts","gitBlob":"1f8460a3e007f77b317b0c7a9ec9e71afc919452"},
+    {"path":"packages/shared-policy-capability-pack-runtime-core/src/index.ts","gitBlob":"41ab12bb65db1b202142a219765e3f2eb1b94626"},
+    {"path":"packages/shared-policy-application/src/index.ts","gitBlob":"f24df05dcbdf6b894b408114c02385c4e41423c6"}
+  ],
+  "coverage":["issue", "read", "current", "signed-claims", "idempotency", "lost-reply", "revocation", "malformed-consent-expiry"],
+  "nonClaims":["synthetic external owners and storage", "not a PostgreSQL proof", "not complete wire vectors", "not a Rust compatibility result"]
+}

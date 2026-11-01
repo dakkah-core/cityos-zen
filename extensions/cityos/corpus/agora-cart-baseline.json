@@ -1,0 +1,25 @@
+{
+  "schemaVersion":"cityos.zen.synthetic-agora-cart-characterization.v1",
+  "source":{
+    "repository":"dakkah-cityos-cms",
+    "path":"packages/agora-demand-commitment-application/src/use-cases/demand-extensions.ts",
+    "gitBlob":"ea1b02002426e0732a39a83399fb589a9dcc7748",
+    "classification":"synthetic-source-local-characterization"
+  },
+  "ruleTemplates":{
+    "minimum":{"id":"row-min","tenantId":"tenant-1","ruleId":"min","ruleType":"min_subtotal","minSubtotalHalalas":200,"message":"minimum","status":"active","createdAt":"2026-09-11T00:00:00.000Z","updatedAt":"2026-09-11T00:00:00.000Z"},
+    "maximum":{"id":"row-max","tenantId":"tenant-1","ruleId":"max","ruleType":"max_quantity","targetSku":"sku-1","minSubtotalHalalas":0,"maxQuantity":1,"message":"maximum","status":"active","createdAt":"2026-09-11T00:00:00.000Z","updatedAt":"2026-09-11T00:00:00.000Z"},
+    "blocked":{"id":"row-block","tenantId":"tenant-1","ruleId":"block","ruleType":"sku_block","targetSku":"sku-1","minSubtotalHalalas":0,"message":"blocked","status":"active","createdAt":"2026-09-11T00:00:00.000Z","updatedAt":"2026-09-11T00:00:00.000Z"}
+  },
+  "cases":[
+    {"id":"minimum-fails","tenantId":"tenant-1","body":{"items":[{"sku":"sku-1","quantity":1,"unitAmountHalalas":150}]},"rules":[{"template":"minimum"}],"expected":{"outcome":"evaluated","allowed":false,"subtotalHalalas":150,"violations":["min"]}},
+    {"id":"minimum-boundary","tenantId":"tenant-1","body":{"items":[{"sku":"sku-1","quantity":1,"unitAmountHalalas":200}]},"rules":[{"template":"minimum"}],"expected":{"outcome":"evaluated","allowed":true,"subtotalHalalas":200,"violations":[]}},
+    {"id":"maximum-target-sku","tenantId":"tenant-1","body":{"items":[{"sku":"sku-1","quantity":2,"unitAmountHalalas":500},{"sku":"sku-2","quantity":1,"unitAmountHalalas":100}]},"rules":[{"template":"maximum"}],"expected":{"outcome":"evaluated","allowed":false,"subtotalHalalas":1100,"violations":["max"]}},
+    {"id":"maximum-other-sku","tenantId":"tenant-1","body":{"items":[{"sku":"sku-2","quantity":2,"unitAmountHalalas":100}]},"rules":[{"template":"maximum"}],"expected":{"outcome":"evaluated","allowed":true,"subtotalHalalas":200,"violations":[]}},
+    {"id":"blocked-sku","tenantId":"tenant-1","body":{"items":[{"sku":"sku-1","quantity":1,"unitAmountHalalas":100}]},"rules":[{"template":"blocked"}],"expected":{"outcome":"evaluated","allowed":false,"subtotalHalalas":100,"violations":["block"]}},
+    {"id":"inactive-ignored","tenantId":"tenant-1","body":{"items":[{"sku":"sku-1","quantity":1,"unitAmountHalalas":100}]},"rules":[{"template":"blocked","override":{"status":"inactive"}}],"expected":{"outcome":"evaluated","allowed":true,"subtotalHalalas":100,"violations":[]}},
+    {"id":"empty-rules","tenantId":"tenant-1","body":{"items":[{"sku":"sku-1","quantity":1,"unitAmountHalalas":100}]},"rules":[],"expected":{"outcome":"evaluated","allowed":true,"subtotalHalalas":100,"violations":[]}},
+    {"id":"foreign-rule","tenantId":"tenant-1","body":{"items":[{"sku":"sku-1","quantity":1,"unitAmountHalalas":100}]},"rules":[{"template":"blocked","override":{"tenantId":"tenant-2"}}],"expected":{"outcome":"unavailable","code":"CART_RULE_CONTEXT_MISMATCH"}},
+    {"id":"line-overflow","tenantId":"tenant-1","body":{"items":[{"sku":"sku-1","quantity":9007199254740991,"unitAmountHalalas":2}]},"rules":[],"expected":{"outcome":"invalid","code":"CART_RULE_LINE_SUBTOTAL_OVERFLOW"}}
+  ]
+}

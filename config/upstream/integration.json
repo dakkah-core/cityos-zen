@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "cityos.zen-upstream-integration.v1",
+  "upstream": {
+    "repository": "https://github.com/gorules/zen.git",
+    "branch": "master",
+    "commit": "ec108e8069d9eb3154e1856310cc1e8b6bcf4276"
+  },
+  "fork": {
+    "repository": "https://github.com/dakkah-core/cityos-zen.git",
+    "branch": "master",
+    "baselineCommit": "ec108e8069d9eb3154e1856310cc1e8b6bcf4276"
+  },
+  "ownedDirectories": ["extensions/cityos", "config/upstream", "scripts/upstream", "scripts/corpus", "docs/cityos"],
+  "protectedControls": ["config/upstream/integration.json", "scripts/upstream/integration.py", "scripts/upstream/check_toolchain.py", "scripts/upstream/test_integration.py", ".github/workflows/cityos-qualification.yaml", ".github/workflows/cityos-extension-tests.yaml", ".github/workflows/rust.yaml", ".github/workflows/node.yaml", ".github/workflows/python.yaml", ".github/workflows/go.yaml", ".github/workflows/uniffi.yaml", ".github/workflows/beta-release.yaml", ".github/workflows/release-please.yaml", ".github/workflows/benchmark.yaml", "extensions/cityos/rust-toolchain.toml"],
+  "requiredChecks": ["source-boundary", "core-tests", "semantic-conformance", "isolation-limits", "artifact-consumers", "cityos-owner-host"],
+  "changes": [
+    {
+      "id": "protect-upstream-publishing",
+      "purpose": "Prevent inherited release jobs from publishing upstream packages and remove private cache credentials from build jobs.",
+      "invariant": "Inherited publication and release creation jobs run only in gorules/zen; build jobs do not receive upstream private-cache or publishing permissions.",
+      "paths": [".github/workflows/rust.yaml", ".github/workflows/node.yaml", ".github/workflows/python.yaml", ".github/workflows/go.yaml", ".github/workflows/uniffi.yaml", ".github/workflows/beta-release.yaml", ".github/workflows/release-please.yaml", ".github/workflows/benchmark.yaml"],
+      "tests": ["scripts/upstream/test_integration.py"],
+      "upstreamBase": "ec108e8069d9eb3154e1856310cc1e8b6bcf4276",
+      "status": "active",
+      "retirement": "Retire only when the upstream workflow enforces an equivalent repository restriction."
+    },
+    {
+      "id": "cityos-qualification-workflow",
+      "purpose": "Run a base-controlled source boundary separately from unprivileged candidate tests.",
+      "invariant": "Pull request source checks execute previously trusted controls; candidate code has no publishing credentials and cannot modify the trusted check.",
+      "paths": [".github/workflows/cityos-qualification.yaml", ".github/workflows/cityos-extension-tests.yaml"],
+      "tests": ["scripts/upstream/test_integration.py"],
+      "upstreamBase": "ec108e8069d9eb3154e1856310cc1e8b6bcf4276",
+      "status": "active",
+      "retirement": "Retire only after an equivalent protected qualification workflow is accepted."
+    }
+  ],
+  "nonClaims": ["Source checks do not establish runtime qualification, publication, activation, or owner approval."]
+}

@@ -1,0 +1,24 @@
+{
+  "imports": [],
+  "blocks": [
+    {
+      "id": "cart-model",
+      "type": "dataModel",
+      "props": {
+        "data": {
+          "name": "cart",
+          "properties": [
+            {"id":"quantity","name":"quantity","type":"number","array":false,"optional":false},
+            {"id":"max","name":"maxQuantity","type":"number","array":false,"optional":false},
+            {"id":"authorized","name":"authorized","type":"boolean","array":false,"optional":false}
+          ]
+        }
+      }
+    },
+    {
+      "id": "cart-decision",
+      "type": "expression",
+      "props": {"data": {"key":"cart.allowed","value":"cart.authorized and cart.quantity <= cart.maxQuantity"}}
+    }
+  ]
+}

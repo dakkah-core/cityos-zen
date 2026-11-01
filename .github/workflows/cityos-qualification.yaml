@@ -1,0 +1,38 @@
+name: CityOS trusted source boundary
+
+on:
+  pull_request_target:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  source-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Check boundary with trusted base controls
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CANDIDATE: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/gorules/zen.git
+          git fetch --no-tags upstream refs/heads/master:refs/remotes/upstream/master
+          if git cat-file -e "$BASE:scripts/upstream/integration.py" 2>/dev/null; then
+            git show "$BASE:scripts/upstream/integration.py" > "$RUNNER_TEMP/cityos-trusted-boundary.py"
+            python "$RUNNER_TEMP/cityos-trusted-boundary.py" --root "$GITHUB_WORKSPACE" --base "$BASE" --candidate "$CANDIDATE"
+          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$BASE" = ec108e8069d9eb3154e1856310cc1e8b6bcf4276 ]; then
+            echo 'Bootstrap uses candidate controls; independent initial review remains required.'
+            python scripts/upstream/integration.py --base "$BASE" --candidate "$CANDIDATE" --bootstrap
+          else
+            echo 'The trusted base has no preservation controls.' >&2
+            exit 1
+          fi

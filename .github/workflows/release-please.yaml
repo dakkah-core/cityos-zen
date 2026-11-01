@@ -29,11 +29,14 @@ on:
       - master
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   release-please:
+    permissions:
+      contents: write
+      pull-requests: write
+    if: github.repository == 'gorules/zen'
     name: Release Please
     runs-on: ubuntu-latest
     steps:

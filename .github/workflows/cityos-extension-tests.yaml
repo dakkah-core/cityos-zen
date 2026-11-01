@@ -1,0 +1,46 @@
+name: CityOS extension tests
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  source-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - run: python -m unittest discover -s scripts/upstream -p 'test_*.py' -v
+
+  extension-tests:
+    needs: source-regressions
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Read protected toolchain projection
+        id: projected
+        run: |
+          python -c 'import os,tomllib; p=tomllib.load(open("extensions/cityos/rust-toolchain.toml","rb")); open(os.environ["GITHUB_OUTPUT"],"a").write("channel="+p["toolchain"]["channel"]+"\n")'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.projected.outputs.channel }}
+          components: rustfmt, clippy
+      - name: Check extension formatting
+        run: cargo fmt --manifest-path extensions/cityos/Cargo.toml --all -- --check
+      - name: Test locked extension workspace
+        run: cargo test --manifest-path extensions/cityos/Cargo.toml --workspace --locked
+      - name: Lint extension workspace
+        run: cargo clippy --manifest-path extensions/cityos/Cargo.toml --workspace --all-targets --locked -- -D warnings
