@@ -16,7 +16,7 @@ use serde_json::{json, Map, Number, Value};
 use sha2::{Digest, Sha256};
 use zen_engine::loader::{DecisionLoader, LoaderError, LoaderResponse};
 use zen_engine::model::DecisionContent;
-use zen_engine::policy::{PolicyDocument, PolicyWorkspace};
+use zen_engine::policy::{DependencyNode, PolicyDocument, PolicyWorkspace};
 use zen_engine::DecisionEngine;
 use zen_expression::lexer::{ComparisonOperator, Lexer, LogicalOperator, Operator, TokenKind};
 use zen_expression::parser::{Node, Parser};
@@ -145,7 +145,11 @@ enum Ty {
     Integer,
 }
 
-fn expression_type(node: &Node<'_>, depth: usize) -> Result<Ty, PolicyError> {
+fn expression_type(
+    node: &Node<'_>,
+    depth: usize,
+    reads: &mut BTreeSet<&'static str>,
+) -> Result<Ty, PolicyError> {
     if depth > 32 {
         return Err(PolicyError::Unsupported);
     }
@@ -159,23 +163,33 @@ fn expression_type(node: &Node<'_>, depth: usize) -> Result<Ty, PolicyError> {
             }
             Ok(Ty::Integer)
         }
-        Node::Parenthesized(inner) => expression_type(inner, depth + 1),
+        Node::Parenthesized(inner) => expression_type(inner, depth + 1, reads),
         Node::Member { node, property } => match (&**node, &**property) {
-            (Node::Identifier("cart"), Node::String("quantity" | "maxQuantity")) => Ok(Ty::Integer),
-            (Node::Identifier("cart"), Node::String("authorized")) => Ok(Ty::Boolean),
+            (Node::Identifier("cart"), Node::String("quantity")) => {
+                reads.insert("cart.quantity");
+                Ok(Ty::Integer)
+            }
+            (Node::Identifier("cart"), Node::String("maxQuantity")) => {
+                reads.insert("cart.maxQuantity");
+                Ok(Ty::Integer)
+            }
+            (Node::Identifier("cart"), Node::String("authorized")) => {
+                reads.insert("cart.authorized");
+                Ok(Ty::Boolean)
+            }
             _ => Err(PolicyError::Unsupported),
         },
         Node::Unary {
             node,
             operator: Operator::Logical(LogicalOperator::Not),
-        } if expression_type(node, depth + 1)? == Ty::Boolean => Ok(Ty::Boolean),
+        } if expression_type(node, depth + 1, reads)? == Ty::Boolean => Ok(Ty::Boolean),
         Node::Binary {
             left,
             right,
             operator,
         } => {
-            let left = expression_type(left, depth + 1)?;
-            let right = expression_type(right, depth + 1)?;
+            let left = expression_type(left, depth + 1, reads)?;
+            let right = expression_type(right, depth + 1, reads)?;
             match operator {
                 Operator::Logical(LogicalOperator::And | LogicalOperator::Or)
                     if left == Ty::Boolean && right == Ty::Boolean =>
@@ -200,7 +214,7 @@ fn expression_type(node: &Node<'_>, depth: usize) -> Result<Ty, PolicyError> {
     }
 }
 
-fn validate_expression(source: &str) -> Result<(), PolicyError> {
+fn validate_expression(source: &str) -> Result<BTreeSet<&'static str>, PolicyError> {
     if source.is_empty() || source.len() > 4096 {
         return Err(PolicyError::Unsupported);
     }
@@ -221,10 +235,42 @@ fn validate_expression(source: &str) -> Result<(), PolicyError> {
         .standard();
     let parsed = parser.parse();
     parsed.error().map_err(|_| PolicyError::Unsupported)?;
-    if expression_type(parsed.root, 0)? != Ty::Boolean {
+    let mut reads = BTreeSet::new();
+    if expression_type(parsed.root, 0, &mut reads)? != Ty::Boolean {
         return Err(PolicyError::Unsupported);
     }
     zen_expression::compile_expression(source).map_err(|_| PolicyError::Compile)?;
+    Ok(reads)
+}
+
+// Check Zen's own goal analysis against the independently restricted expression AST.
+// A missing writer, unresolved path, additional computed rule, or incomplete read
+// set cannot serve as evidence of a closed deterministic preview.
+fn validate_goal_closure(
+    goal: &DependencyNode,
+    expected_reads: &BTreeSet<&str>,
+) -> Result<(), PolicyError> {
+    let writer = goal.written_by.as_ref().ok_or(PolicyError::Analysis)?;
+    if goal.property.as_ref() != "cart.allowed"
+        || goal.unresolved
+        || writer.policy_path.as_ref() != "cart"
+        || writer.block_id.as_ref() != "cart-decision"
+    {
+        return Err(PolicyError::Analysis);
+    }
+    let mut actual_reads = BTreeSet::new();
+    for dependency in &goal.deps {
+        if dependency.unresolved
+            || dependency.written_by.is_some()
+            || !dependency.deps.is_empty()
+            || !actual_reads.insert(dependency.property.as_ref())
+        {
+            return Err(PolicyError::Analysis);
+        }
+    }
+    if &actual_reads != expected_reads {
+        return Err(PolicyError::Analysis);
+    }
     Ok(())
 }
 
@@ -292,7 +338,7 @@ pub fn admit(source: &[u8]) -> Result<AdmittedPreview, PolicyError> {
     if data.len() != 2 || data.get("key").and_then(Value::as_str) != Some("cart.allowed") {
         return Err(PolicyError::Unsupported);
     }
-    validate_expression(
+    let expected_reads = validate_expression(
         data.get("value")
             .and_then(Value::as_str)
             .ok_or(PolicyError::Unsupported)?,
@@ -301,9 +347,13 @@ pub fn admit(source: &[u8]) -> Result<AdmittedPreview, PolicyError> {
         serde_json::from_value(value).map_err(|_| PolicyError::InvalidSource)?;
     let mut workspace = PolicyWorkspace::new();
     workspace.set_policy("cart", document.clone());
-    if !workspace.all_diagnostics().is_empty() {
+    if !workspace.all_diagnostics().is_empty() || !workspace.document_uses("cart").is_empty() {
         return Err(PolicyError::Analysis);
     }
+    validate_goal_closure(
+        &workspace.dependencies_scoped("cart.allowed", Some("cart")),
+        &expected_reads,
+    )?;
     let loader = Arc::new(ImmutableLoader {
         content: Arc::new(DecisionContent::Policy(Arc::new(document.clone()).into())),
         entry_reads: AtomicUsize::new(0),
@@ -321,7 +371,7 @@ pub fn admit(source: &[u8]) -> Result<AdmittedPreview, PolicyError> {
 }
 
 #[cfg(test)]
-mod tests {
+mod compile_evidence_tests {
     use super::*;
 
     fn loader() -> Result<ImmutableLoader, Box<dyn std::error::Error>> {
@@ -383,7 +433,8 @@ mod tests {
             serde_json::from_slice(include_bytes!("../../../corpus/cart-quantity-preview.json"))?;
         let loader = ImmutableLoader {
             content: Arc::new(DecisionContent::Policy(Arc::new(document).into())),
-            synchronous_reads: AtomicUsize::new(0),
+            entry_reads: AtomicUsize::new(0),
+            unexpected_reads: AtomicUsize::new(0),
             dynamic_reads: AtomicUsize::new(0),
         };
         assert_eq!(loader.keys(), Some(vec![Arc::from("cart")]));
@@ -399,6 +450,86 @@ mod tests {
             Poll::Ready(Err(LoaderError::NotFound(_)))
         ));
         assert_eq!(loader.dynamic_reads.load(Ordering::Relaxed), 1);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod closure_tests {
+    use super::*;
+
+    #[test]
+    fn goal_closure_rejects_incomplete_or_ambiguous_analysis(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let document: PolicyDocument =
+            serde_json::from_slice(include_bytes!("../../../corpus/cart-quantity-preview.json"))?;
+        let mut workspace = PolicyWorkspace::new();
+        workspace.set_policy("cart", document);
+        let goal = workspace.dependencies_scoped("cart.allowed", Some("cart"));
+        let expected = BTreeSet::from(["cart.authorized", "cart.maxQuantity", "cart.quantity"]);
+        validate_goal_closure(&goal, &expected)?;
+
+        let mut missing = goal.clone();
+        missing.deps.pop();
+        assert_eq!(
+            validate_goal_closure(&missing, &expected),
+            Err(PolicyError::Analysis)
+        );
+
+        let mut unresolved = goal.clone();
+        unresolved.deps[0].unresolved = true;
+        assert_eq!(
+            validate_goal_closure(&unresolved, &expected),
+            Err(PolicyError::Analysis)
+        );
+
+        let mut extra = goal.clone();
+        let mut unexpected = extra.deps[0].clone();
+        unexpected.property = Arc::from("cart.secret");
+        extra.deps.push(unexpected);
+        assert_eq!(
+            validate_goal_closure(&extra, &expected),
+            Err(PolicyError::Analysis)
+        );
+
+        let mut duplicate = goal.clone();
+        duplicate.deps.push(duplicate.deps[0].clone());
+        assert_eq!(
+            validate_goal_closure(&duplicate, &expected),
+            Err(PolicyError::Analysis)
+        );
+
+        let mut wrong_writer = goal.clone();
+        wrong_writer
+            .written_by
+            .as_mut()
+            .ok_or("missing writer")?
+            .policy_path = Arc::from("other");
+        assert_eq!(
+            validate_goal_closure(&wrong_writer, &expected),
+            Err(PolicyError::Analysis)
+        );
+
+        let mut no_writer = goal.clone();
+        no_writer.written_by = None;
+        assert_eq!(
+            validate_goal_closure(&no_writer, &expected),
+            Err(PolicyError::Analysis)
+        );
+
+        let mut nested = goal.clone();
+        nested.deps[0].deps.push(goal.deps[1].clone());
+        assert_eq!(
+            validate_goal_closure(&nested, &expected),
+            Err(PolicyError::Analysis)
+        );
+
+        let mut computed_input = goal.clone();
+        computed_input.deps[0].written_by = goal.written_by.clone();
+        assert_eq!(
+            validate_goal_closure(&computed_input, &expected),
+            Err(PolicyError::Analysis)
+        );
         Ok(())
     }
 }

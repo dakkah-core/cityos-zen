@@ -15,7 +15,10 @@ export default {
   test: { environment: 'node' },
   resolve: {
     extensions: ['.ts', '.tsx', '.mjs', '.js', '.json'],
-    alias: packages.map(name => ({ find: `@cityos/${name}`, replacement: resolve(cms, 'packages', name, 'src/index.ts') })),
+    alias: [
+      { find: '@cityos/agora-demand-commitment-application', replacement: resolve(cms, 'packages/agora-demand-commitment-application/src/use-cases/cart-rule-revision.ts') },
+      ...packages.map(name => ({ find: `@cityos/${name}`, replacement: resolve(cms, 'packages', name, 'src/index.ts') })),
+    ],
   },
   plugins: [{
     name: 'cityos-policy-authored-typescript',

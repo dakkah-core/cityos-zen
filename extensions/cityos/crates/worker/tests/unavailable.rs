@@ -7,6 +7,8 @@ fn unqualified_worker_returns_no_authorization() -> Result<(), Box<dyn std::erro
         vec!["--authoritative-stdio"],
         vec!["--preview-stdio", "--authoritative-stdio"],
         vec!["--supervised-preview-stdio", "--authoritative-stdio"],
+        vec!["--experimental-network-preview-stdio", "--authoritative-stdio"],
+        vec!["--experimental-network-child-stdio", "--authoritative-stdio"],
     ] {
         let result = Command::new(env!("CARGO_BIN_EXE_cityos-zen-worker"))
             .args(arguments)

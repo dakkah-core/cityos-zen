@@ -6,7 +6,11 @@ use cityos_zen_contracts::{PolicyError, PreviewFacts, MAX_DOCUMENT_BYTES};
 use serde::Deserialize;
 use serde_json::json;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+mod network;
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+mod resource_limits;
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod supervisor;
 
 const MAX_REQUEST_BYTES: u64 = (MAX_DOCUMENT_BYTES as u64) * 2;
@@ -59,8 +63,14 @@ fn main() -> ExitCode {
     }
     let result = match mode.as_deref().and_then(std::ffi::OsStr::to_str) {
         Some("--preview-stdio") => preview(),
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
         Some("--supervised-preview-stdio") => supervisor::preview(),
+        #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+        Some("--restricted-preview-stdio") => supervisor::restricted_preview(),
+        #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+        Some("--experimental-network-preview-stdio") => supervisor::experimental_network_preview(),
+        #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+        Some("--experimental-network-child-stdio") => supervisor::experimental_network_child(),
         _ => {
             eprintln!("cityos-zen-worker: authoritative isolation profile unavailable");
             return ExitCode::FAILURE;
