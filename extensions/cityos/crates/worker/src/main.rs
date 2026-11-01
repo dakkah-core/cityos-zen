@@ -7,6 +7,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+mod inherited_fds;
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod network;
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod resource_limits;

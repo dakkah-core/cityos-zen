@@ -43,6 +43,38 @@ fn rejects_unclosed_or_non_deterministic_expressions() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn rejects_deeply_nested_templates_before_lexing() -> Result<(), Box<dyn std::error::Error>> {
+    const PROBE: &str = "CITYOS_ZEN_TEMPLATE_STACK_PROBE";
+    if std::env::var_os(PROBE).is_some() {
+        // Each interpolation makes Zen's lexer recursively scan another template.
+        // The source stays under the expression byte limit.
+        let expression = format!("{}true{}", "`${".repeat(750), "}`".repeat(750));
+        assert!(expression.len() < 4096);
+        let source = with_expression(&expression)?;
+        let rejected = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || matches!(admit(&source), Err(PolicyError::Unsupported)))?
+            .join()
+            .map_err(|_| "admission thread panicked")?;
+        assert!(rejected);
+        return Ok(());
+    }
+
+    // A stack overflow aborts a process, so isolate the pre-fix failure from
+    // the rest of the test suite.
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", "rejects_deeply_nested_templates_before_lexing"])
+        .env(PROBE, "1")
+        .output()?;
+    assert!(output.status.success(), "nested template probe failed");
+    assert!(admit(&with_expression(
+        "cart.authorized and cart.quantity <= cart.maxQuantity"
+    )?)
+    .is_ok());
+    Ok(())
+}
+
+#[test]
 fn rejects_ambiguous_json_and_external_documents() -> Result<(), Box<dyn std::error::Error>> {
     let source = std::str::from_utf8(SOURCE)?;
     let candidates = [

@@ -56,6 +56,80 @@ fn supervised_preview_is_bounded_and_non_authoritative() -> Result<(), Box<dyn s
 
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 #[test]
+fn restricted_evaluators_close_inherited_descriptors_before_reading_input(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let marker = std::env::temp_dir().join(format!("zen-inherited-{}-{nonce}", std::process::id()));
+    let marker_file = std::fs::OpenOptions::new().write(true).create_new(true).open(&marker)?;
+    drop(marker_file);
+    let marker = std::fs::canonicalize(marker)?;
+    let request = serde_json::to_vec(&json!({"kind":"preview", "source":SOURCE,
+        "facts":{"quantity":1,"maxQuantity":2,"authorized":true}}))?;
+
+    // The shell deliberately opens fd 9 without close-on-exec. The unrestricted
+    // preview is a positive control proving that the launcher passes it through.
+    for mode in ["--preview-stdio", "--restricted-preview-stdio", "--supervised-preview-stdio"] {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exec 9<\"$1\"; exec \"$2\" \"$3\"")
+            .arg("test")
+            .arg(&marker)
+            .arg(env!("CARGO_BIN_EXE_cityos-zen-worker"))
+            .arg(mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut input = child.stdin.take().ok_or("missing stdin")?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let observed = loop {
+            let evaluator = if mode == "--supervised-preview-stdio" {
+                let path = format!("/proc/{0}/task/{0}/children", child.id());
+                std::fs::read_to_string(path).ok().and_then(|pids| {
+                    pids.split_whitespace().next().and_then(|pid| pid.parse::<u32>().ok())
+                })
+            } else {
+                Some(child.id())
+            };
+            if let Some(pid) = evaluator {
+                let fd_dir = format!("/proc/{pid}/fd");
+                let targets = std::fs::read_dir(fd_dir).and_then(|entries| {
+                    entries.map(|entry| std::fs::read_link(entry?.path())).collect::<std::io::Result<Vec<_>>>()
+                });
+                if mode == "--preview-stdio" && targets.as_ref().is_ok_and(|targets| targets.contains(&marker)) {
+                    break true;
+                }
+                if mode != "--preview-stdio" {
+                    let ready = std::fs::read_to_string(format!("/proc/{pid}/status"))
+                        .is_ok_and(|status| status.lines().any(|line| {
+                            line.strip_prefix("NoNewPrivs:").is_some_and(|value| value.trim() == "1")
+                        }));
+                    if ready && targets.as_ref().is_ok_and(|targets| !targets.contains(&marker)) {
+                        break true;
+                    }
+                }
+            }
+            if child.try_wait()?.is_some() || Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        input.write_all(&request)?;
+        drop(input);
+        let result = child.wait_with_output()?;
+        assert!(observed, "descriptor state was not observed for {mode}");
+        assert!(result.status.success(), "preview failed for {mode}");
+        let body: Value = serde_json::from_slice(&result.stdout)?;
+        assert_eq!(body["allowed"], true);
+    }
+    std::fs::remove_file(marker)?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+#[test]
 fn experimental_network_preview_is_isolated_or_unavailable(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::{Duration, Instant};

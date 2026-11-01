@@ -21,6 +21,12 @@ use zen_engine::DecisionEngine;
 use zen_expression::lexer::{ComparisonOperator, Lexer, LogicalOperator, Operator, TokenKind};
 use zen_expression::parser::{Node, Parser};
 
+// Bound parser work before constructing or traversing an expression AST.
+const MAX_EXPRESSION_TOKENS: usize = 128;
+// The fixed preview document is shallow; bound recursive JSON deserialization
+// before the deserializer constructs values from unsupported input.
+const MAX_JSON_NESTING: usize = 32;
+
 /// Only this crate can construct an admitted preview document.
 #[derive(Clone)]
 pub struct AdmittedPreview {
@@ -215,7 +221,10 @@ fn expression_type(
 }
 
 fn validate_expression(source: &str) -> Result<BTreeSet<&'static str>, PolicyError> {
-    if source.is_empty() || source.len() > 4096 {
+    // Templates are outside this profile. Reject their delimiter before Zen's
+    // lexer, which recursively scans nested template interpolations before the
+    // token budget can be checked.
+    if source.is_empty() || source.len() > 4096 || source.as_bytes().contains(&b'`') {
         return Err(PolicyError::Unsupported);
     }
     let bump = Bump::new();
@@ -223,6 +232,9 @@ fn validate_expression(source: &str) -> Result<BTreeSet<&'static str>, PolicyErr
     let tokens = lexer
         .tokenize(&bump, source)
         .map_err(|_| PolicyError::Unsupported)?;
+    if tokens.len() > MAX_EXPRESSION_TOKENS {
+        return Err(PolicyError::Unsupported);
+    }
     if tokens.iter().any(|token| {
         token.kind == TokenKind::Number
             && (!token.value.chars().all(|c| c.is_ascii_digit())
@@ -274,10 +286,40 @@ fn validate_goal_closure(
     Ok(())
 }
 
+fn json_nesting_within_limit(source: &[u8]) -> bool {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for &byte in source {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b'{' | b'[' => {
+                    depth += 1;
+                    if depth > MAX_JSON_NESTING {
+                        return false;
+                    }
+                }
+                b'}' | b']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
 /// Admit a single fixed-shape policy document for synthetic cart previews.
 /// No imports, computed fact acquisition or authorizing receipt are supported.
 pub fn admit(source: &[u8]) -> Result<AdmittedPreview, PolicyError> {
-    if source.len() > MAX_DOCUMENT_BYTES {
+    if source.len() > MAX_DOCUMENT_BYTES || !json_nesting_within_limit(source) {
         return Err(PolicyError::InvalidSource);
     }
     let mut decoder = serde_json::Deserializer::from_slice(source);
@@ -451,6 +493,44 @@ mod tests {
         ));
         assert_eq!(loader.dynamic_reads.load(Ordering::Relaxed), 1);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod expression_budget_tests {
+    use super::*;
+
+    fn balanced_expression(levels: usize) -> String {
+        if levels == 0 {
+            "true".to_owned()
+        } else {
+            let inner = balanced_expression(levels - 1);
+            format!("({inner} or {inner})")
+        }
+    }
+
+    #[test]
+    fn token_budget_rejects_wide_expressions_before_parsing() {
+        // Both trees are well below the existing AST depth limit; only the
+        // larger one exceeds the token budget.
+        assert!(validate_expression(&balanced_expression(4)).is_ok());
+        assert_eq!(
+            validate_expression(&balanced_expression(6)),
+            Err(PolicyError::Unsupported)
+        );
+    }
+
+    #[test]
+    fn token_budget_rejects_deep_unary_and_parenthesized_inputs() {
+        let unary = format!("{}true", "not ".repeat(MAX_EXPRESSION_TOKENS));
+        let parentheses = format!(
+            "{}true{}",
+            "(".repeat(MAX_EXPRESSION_TOKENS),
+            ")".repeat(MAX_EXPRESSION_TOKENS)
+        );
+        for source in [unary, parentheses] {
+            assert_eq!(validate_expression(&source), Err(PolicyError::Unsupported));
+        }
     }
 }
 

@@ -6,6 +6,9 @@ fn main() -> ExitCode {
     let script = root.join("scripts/upstream/integration.py");
     let python = if cfg!(windows) { "python" } else { "python3" };
     match Command::new(python)
+        // The boundary checker must not import caller-supplied PYTHONPATH or
+        // user-site startup code before it can inspect the candidate.
+        .arg("-I")
         .arg(script)
         .args(std::env::args_os().skip(1))
         .status()

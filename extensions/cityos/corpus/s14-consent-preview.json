@@ -1,0 +1,21 @@
+{
+  "imports": [],
+  "blocks": [
+    {
+      "id": "s14-consent-model",
+      "type": "dataModel",
+      "props": {"data": {"name": "consent", "properties": [
+        {"id":"required","name":"required","type":"boolean","array":false,"optional":false},
+        {"id":"granted","name":"granted","type":"boolean","array":false,"optional":false},
+        {"id":"has-expiry","name":"hasExpiry","type":"boolean","array":false,"optional":false},
+        {"id":"now","name":"now","type":"number","array":false,"optional":false},
+        {"id":"expires-at","name":"expiresAt","type":"number","array":false,"optional":false}
+      ]}}
+    },
+    {
+      "id": "s14-consent-gate",
+      "type": "expression",
+      "props": {"data": {"key":"consent.satisfied","value":"consent.required == false or (consent.granted and (consent.hasExpiry == false or consent.now < consent.expiresAt))"}}
+    }
+  ]
+}

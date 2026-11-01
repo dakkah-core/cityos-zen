@@ -120,6 +120,15 @@ def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
     return result.returncode == 0
 
 
+def unrecorded_upstream_commits(root: Path, base: str, candidate: str, upstream: str, observed: str) -> set[str]:
+    # Find newly introduced candidate commits that are also in the fetched
+    # upstream history, excluding everything covered by the selected commit.
+    exclusions = ("--not", base, upstream)
+    candidate_commits = set(text(root, "rev-list", candidate, *exclusions).splitlines())
+    upstream_commits = set(text(root, "rev-list", observed, *exclusions).splitlines())
+    return candidate_commits & upstream_commits
+
+
 def changed(left: dict, right: dict) -> set[str]:
     return {name for name in left.keys() | right.keys() if left.get(name) != right.get(name)}
 
@@ -201,10 +210,15 @@ def check(root: Path, base: str, candidate: str, bootstrap: bool = False, check_
     upstream = manifest["upstream"]["commit"]
     try:
         observed_upstream = text(root, "rev-parse", "--verify", f"{UPSTREAM_REF}^{{commit}}")
-        if not SHA.fullmatch(observed_upstream) or not is_ancestor(root, upstream, observed_upstream):
-            errors.append("selected upstream is not reachable from the fetched upstream branch")
     except BoundaryError:
         errors.append("fetched upstream branch is unavailable")
+    else:
+        if not SHA.fullmatch(observed_upstream) or not is_ancestor(root, upstream, observed_upstream):
+            errors.append("selected upstream is not reachable from the fetched upstream branch")
+        else:
+            unrecorded = unrecorded_upstream_commits(root, base, candidate, upstream, observed_upstream)
+            if unrecorded:
+                errors.append(f"candidate incorporates unrecorded upstream ancestry: {', '.join(sorted(unrecorded))}")
     if not is_ancestor(root, previous_upstream, base):
         errors.append("trusted upstream is not an ancestor of trusted base")
     if not is_ancestor(root, previous_upstream, upstream):

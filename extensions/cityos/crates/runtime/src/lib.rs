@@ -6,6 +6,8 @@ use cityos_zen_contracts::{PolicyError, PreviewFacts, PreviewResult, PROFILE};
 use serde_json::{json, Value};
 use zen_engine::policy::{EvaluateRequest, PolicyWorkspace};
 
+pub mod s14_consent;
+
 pub fn evaluate_preview(
     policy: &AdmittedPreview,
     facts: &PreviewFacts,

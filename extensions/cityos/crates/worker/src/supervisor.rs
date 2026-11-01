@@ -54,10 +54,12 @@ fn cleanup(mut child: Child, pid: Pid) -> Result<(), ()> {
         Err(Errno::ESRCH) if exited => true,
         Err(_) => false,
     };
-    if !signalled && !exited {
-        // The child may have left its group; still try to stop the direct child.
-        let _ = child.kill();
-    }
+    // A successful group signal does not prove it reached the direct child:
+    // the child can join another process group while descendants remain here.
+    // Its PID is still reserved, so also signal the direct child before reaping.
+    let direct_stopped = exited
+        || child.kill().is_ok()
+        || child_status(pid).is_ok_and(|status| !matches!(status, WaitStatus::StillAlive));
     if exited {
         child.wait().map_err(|_| ())?;
     } else {
@@ -66,7 +68,13 @@ fn cleanup(mut child: Child, pid: Pid) -> Result<(), ()> {
         let started = Instant::now();
         while started.elapsed() < REAP_GRACE {
             match child.try_wait() {
-                Ok(Some(_)) => return if signalled { Ok(()) } else { Err(()) },
+                Ok(Some(_)) => {
+                    return if signalled && direct_stopped {
+                        Ok(())
+                    } else {
+                        Err(())
+                    }
+                }
                 Ok(None) => {
                     thread::sleep(POLL_INTERVAL.min(REAP_GRACE.saturating_sub(started.elapsed())))
                 }
@@ -84,7 +92,7 @@ fn cleanup(mut child: Child, pid: Pid) -> Result<(), ()> {
             })
             .map_err(|_| ())?;
     }
-    if signalled {
+    if signalled && direct_stopped {
         Ok(())
     } else {
         Err(())
@@ -194,6 +202,7 @@ fn supervised_preview(child_mode: &str) -> Result<(), PolicyError> {
 /// Install the privilege ceiling and resource limits before reading input.
 /// This preview is not an authority, credential boundary, or sandbox.
 pub(crate) fn restricted_preview() -> Result<(), PolicyError> {
+    crate::inherited_fds::close_and_verify()?;
     require_no_new_privs(
         || set_no_new_privs().map_err(|_| ()),
         || get_no_new_privs().map_err(|_| ()),
@@ -212,6 +221,8 @@ fn network_then_preview(
 }
 
 pub(crate) fn experimental_network_child() -> Result<(), PolicyError> {
+    // A new network namespace does not revoke already-open sockets.
+    crate::inherited_fds::close_and_verify()?;
     network_then_preview(crate::network::isolate, restricted_preview)
 }
 
@@ -280,6 +291,56 @@ mod tests {
         let mut slow = Command::new("/bin/sleep");
         slow.arg("10");
         assert!(supervise(&mut slow, Duration::from_millis(100)).is_err());
+    }
+
+    // Executed only by the regression below, in a separate process group.
+    #[test]
+    fn moved_child_probe() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(base) = std::env::var_os("CITYOS_ZEN_MOVED_CHILD_PROBE") else {
+            return Ok(());
+        };
+        let base = std::path::PathBuf::from(base);
+        let target_group: i32 = std::env::var("CITYOS_ZEN_PARENT_GROUP")?.parse()?;
+        // Keep the original group alive after the direct child leaves it.
+        let _keeper = Command::new("/bin/sleep")
+            .arg("10")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(target_group))?;
+        fs::write(base.with_extension("ready"), b"ready")?;
+        thread::sleep(Duration::from_secs(4));
+        fs::write(base.with_extension("survived"), b"survived")?;
+        Ok(())
+    }
+
+    #[test]
+    fn supervisor_stops_direct_child_after_it_changes_groups(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let base = std::env::temp_dir().join(format!("zen-moved-{}-{nonce}", std::process::id()));
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .arg("--exact")
+            .arg("supervisor::tests::moved_child_probe")
+            .arg("--nocapture")
+            .env("CITYOS_ZEN_MOVED_CHILD_PROBE", &base)
+            .env(
+                "CITYOS_ZEN_PARENT_GROUP",
+                nix::unistd::getpgrp().as_raw().to_string(),
+            );
+        assert!(supervise(&mut command, Duration::from_secs(2)).is_err());
+        let ready = base.with_extension("ready");
+        let survived = base.with_extension("survived");
+        // Allow the probe's delayed marker to expose a direct child that escaped.
+        thread::sleep(Duration::from_secs(4));
+        let moved = ready.exists();
+        let escaped = survived.exists();
+        let _ = fs::remove_file(ready);
+        let _ = fs::remove_file(survived);
+        assert!(moved, "probe never changed process groups");
+        assert!(!escaped, "direct child survived process-group cleanup");
+        Ok(())
     }
 
     #[test]

@@ -198,6 +198,64 @@ class BoundaryTests(unittest.TestCase):
         self.repo.commit("record incoming")
         self.assertTrue(any("upstream collision" in error for error in self.repo.check()))
 
+    def test_unrecorded_upstream_merge_cannot_hide_owned_collision(self):
+        self.repo.run("checkout", "--detach", self.repo.upstream)
+        self.repo.write("extensions/cityos/feature.rs", "upstream collision\n")
+        self.repo.add("extensions/cityos/feature.rs")
+        self.repo.commit("upstream collision")
+        incoming = self.repo.rev()
+        self.repo.run("update-ref", boundary.UPSTREAM_REF, incoming)
+        self.repo.run("checkout", "--detach", self.repo.base)
+        # Keep the CityOS tree while retaining the upstream commit as a parent.
+        self.repo.run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-ff", "-s", "ours", "-m", "hide incoming", incoming)
+        errors = self.repo.check()
+        self.assertTrue(any("unrecorded upstream ancestry" in error and incoming in error for error in errors), errors)
+
+    def test_unrecorded_side_branch_is_rejected_without_requiring_latest_upstream(self):
+        self.repo.run("checkout", "--detach", self.repo.upstream)
+        self.repo.write("core/selected.rs", "selected\n")
+        self.repo.add("core/selected.rs")
+        self.repo.commit("selected upstream")
+        selected = self.repo.rev()
+        self.repo.run("checkout", "--detach", self.repo.upstream)
+        self.repo.write("core/side.rs", "side\n")
+        self.repo.add("core/side.rs")
+        self.repo.commit("upstream side branch")
+        side = self.repo.rev()
+        self.repo.run("checkout", "--detach", selected)
+        self.repo.run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-ff", "-m", "upstream merge", side)
+        self.repo.run("update-ref", boundary.UPSTREAM_REF, self.repo.rev())
+
+        self.repo.run("checkout", "--detach", self.repo.base)
+        self.repo.run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-ff", "-m", "merge selected", selected)
+        path = self.repo.root / boundary.MANIFEST
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["upstream"]["commit"] = selected
+        self.repo.write(boundary.MANIFEST, json.dumps(manifest))
+        self.repo.add(boundary.MANIFEST)
+        self.repo.commit("record selected upstream")
+        self.repo.run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-q", "-m", "CityOS-only commit")
+        self.assertEqual(self.repo.check(), [])
+
+        self.repo.run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-ff", "-s", "ours", "-m", "hide side branch", side)
+        errors = self.repo.check()
+        self.assertTrue(any("unrecorded upstream ancestry" in error and side in error for error in errors), errors)
+
+    def test_upstream_ancestry_already_in_trusted_base_is_not_new(self):
+        self.repo.run("checkout", "--detach", self.repo.upstream)
+        self.repo.write("extensions/cityos/upstream.rs", "already integrated\n")
+        self.repo.add("extensions/cityos/upstream.rs")
+        self.repo.commit("upstream before trusted base")
+        incoming = self.repo.rev()
+        self.repo.run("update-ref", boundary.UPSTREAM_REF, incoming)
+        self.repo.run("checkout", "--detach", self.repo.base)
+        self.repo.run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-ff", "-s", "ours", "-m", "prior integration", incoming)
+        self.repo.base = self.repo.rev()
+        self.repo.write("extensions/cityos/feature.rs", "CityOS-only update\n")
+        self.repo.add("extensions/cityos/feature.rs")
+        self.repo.commit("CityOS-only update")
+        self.assertEqual(self.repo.check(), [])
+
     def test_owned_symlink_mode_is_rejected(self):
         blob = self.repo.run("hash-object", "-w", "core/original.txt")
         self.repo.run("update-index", "--add", "--cacheinfo", "120000", blob, "extensions/cityos/link")
