@@ -6,6 +6,9 @@ use cityos_zen_contracts::{PolicyError, PreviewFacts, MAX_DOCUMENT_BYTES};
 use serde::Deserialize;
 use serde_json::json;
 
+#[cfg(target_os = "linux")]
+mod supervisor;
+
 const MAX_REQUEST_BYTES: u64 = (MAX_DOCUMENT_BYTES as u64) * 2;
 
 #[derive(Deserialize)]
@@ -49,13 +52,21 @@ fn preview() -> Result<(), PolicyError> {
 
 fn main() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1);
-    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--preview-stdio"))
-        || arguments.next().is_some()
-    {
+    let mode = arguments.next();
+    if arguments.next().is_some() {
         eprintln!("cityos-zen-worker: authoritative isolation profile unavailable");
         return ExitCode::FAILURE;
     }
-    match preview() {
+    let result = match mode.as_deref().and_then(std::ffi::OsStr::to_str) {
+        Some("--preview-stdio") => preview(),
+        #[cfg(target_os = "linux")]
+        Some("--supervised-preview-stdio") => supervisor::preview(),
+        _ => {
+            eprintln!("cityos-zen-worker: authoritative isolation profile unavailable");
+            return ExitCode::FAILURE;
+        }
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => {
             // Do not echo policy source, facts, or dependency errors to a caller.

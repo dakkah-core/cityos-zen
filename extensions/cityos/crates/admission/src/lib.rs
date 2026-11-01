@@ -41,8 +41,17 @@ impl AdmittedPreview {
 #[derive(Debug)]
 struct ImmutableLoader {
     content: Arc<DecisionContent>,
-    synchronous_reads: AtomicUsize,
+    entry_reads: AtomicUsize,
+    unexpected_reads: AtomicUsize,
     dynamic_reads: AtomicUsize,
+}
+
+impl ImmutableLoader {
+    fn compiled_expected_entry_only(&self) -> bool {
+        self.entry_reads.load(Ordering::Relaxed) > 0
+            && self.unexpected_reads.load(Ordering::Relaxed) == 0
+            && self.dynamic_reads.load(Ordering::Relaxed) == 0
+    }
 }
 
 impl DecisionLoader for ImmutableLoader {
@@ -59,10 +68,11 @@ impl DecisionLoader for ImmutableLoader {
     }
 
     fn load_sync(&self, key: &str) -> Option<LoaderResponse> {
-        self.synchronous_reads.fetch_add(1, Ordering::Relaxed);
         Some(if key == "cart" {
+            self.entry_reads.fetch_add(1, Ordering::Relaxed);
             Ok(Arc::clone(&self.content))
         } else {
+            self.unexpected_reads.fetch_add(1, Ordering::Relaxed);
             Err(LoaderError::NotFound(key.to_owned()))
         })
     }
@@ -296,20 +306,69 @@ pub fn admit(source: &[u8]) -> Result<AdmittedPreview, PolicyError> {
     }
     let loader = Arc::new(ImmutableLoader {
         content: Arc::new(DecisionContent::Policy(Arc::new(document.clone()).into())),
-        synchronous_reads: AtomicUsize::new(0),
+        entry_reads: AtomicUsize::new(0),
+        unexpected_reads: AtomicUsize::new(0),
         dynamic_reads: AtomicUsize::new(0),
     });
     let engine = DecisionEngine::default().with_loader(loader.clone());
-    if !engine.compile().is_empty()
-        || loader.synchronous_reads.load(Ordering::Relaxed) == 0
-        || loader.dynamic_reads.load(Ordering::Relaxed) != 0
-    {
+    if !engine.compile().is_empty() || !loader.compiled_expected_entry_only() {
         return Err(PolicyError::Compile);
     }
     Ok(AdmittedPreview {
         document,
         source_sha256: format!("{:x}", Sha256::digest(source)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loader() -> Result<ImmutableLoader, Box<dyn std::error::Error>> {
+        let document: PolicyDocument =
+            serde_json::from_slice(include_bytes!("../../../corpus/cart-quantity-preview.json"))?;
+        Ok(ImmutableLoader {
+            content: Arc::new(DecisionContent::Policy(Arc::new(document).into())),
+            entry_reads: AtomicUsize::new(0),
+            unexpected_reads: AtomicUsize::new(0),
+            dynamic_reads: AtomicUsize::new(0),
+        })
+    }
+
+    #[test]
+    fn compile_evidence_requires_the_expected_entry() -> Result<(), Box<dyn std::error::Error>> {
+        let loader = loader()?;
+        assert!(!loader.compiled_expected_entry_only());
+        assert!(matches!(loader.load_sync("other"), Some(Err(_))));
+        assert!(!loader.compiled_expected_entry_only());
+        Ok(())
+    }
+
+    #[test]
+    fn compile_evidence_rejects_an_unexpected_lookup_even_after_entry_read(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let loader = loader()?;
+        assert!(matches!(loader.load_sync("cart"), Some(Ok(_))));
+        assert!(loader.compiled_expected_entry_only());
+        assert!(matches!(loader.load_sync("other"), Some(Err(_))));
+        assert!(!loader.compiled_expected_entry_only());
+        Ok(())
+    }
+
+    #[test]
+    fn compile_evidence_rejects_dynamic_lookup() -> Result<(), Box<dyn std::error::Error>> {
+        let loader = loader()?;
+        assert!(matches!(loader.load_sync("cart"), Some(Ok(_))));
+        drop(loader.load("cart"));
+        assert!(!loader.compiled_expected_entry_only());
+        Ok(())
+    }
+
+    #[test]
+    fn preview_document_still_compiles() -> Result<(), Box<dyn std::error::Error>> {
+        admit(include_bytes!("../../../corpus/cart-quantity-preview.json"))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
