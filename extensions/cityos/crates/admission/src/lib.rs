@@ -21,6 +21,9 @@ use zen_engine::DecisionEngine;
 use zen_expression::lexer::{ComparisonOperator, Lexer, LogicalOperator, Operator, TokenKind};
 use zen_expression::parser::{Node, Parser};
 
+pub mod s14_consent;
+pub mod v2_boolean;
+
 // Bound parser work before constructing or traversing an expression AST.
 const MAX_EXPRESSION_TOKENS: usize = 128;
 // The fixed preview document is shallow; bound recursive JSON deserialization

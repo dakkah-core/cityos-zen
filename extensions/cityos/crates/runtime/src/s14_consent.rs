@@ -7,14 +7,21 @@
 
 use std::sync::Arc;
 
+use cityos_zen_admission::s14_consent::admit_fixed;
 use cityos_zen_contracts::PolicyError;
 use serde_json::{json, Value};
-use zen_engine::policy::{EvaluateRequest, PolicyDocument, PolicyWorkspace};
+use zen_engine::policy::{EvaluateRequest, PolicyWorkspace};
 
 const SOURCE: &[u8] = include_bytes!("../../../corpus/s14-consent-preview.json");
 // ECMAScript Date's finite time-value range; all integers in this range are
 // exactly representable by a JavaScript Number and by Zen's JSON input.
 const MAX_DATE_MILLIS: i64 = 8_640_000_000_000_000;
+
+/// Admit the embedded preview and return the SHA-256 of its original bytes.
+/// This identifies only this source-local preview, not a qualified policy.
+pub fn admitted_source_sha256() -> Result<String, PolicyError> {
+    Ok(admit_fixed(SOURCE)?.source_sha256().to_owned())
+}
 
 /// Normalized consent state. All supplied expiry strings must first be validated,
 /// even for non-granted consent. Invalid or unsupported dates must return an
@@ -112,10 +119,9 @@ pub fn evaluate(facts: &ConsentFacts) -> Result<ConsentGatePreview, PolicyError>
         return Err(PolicyError::InvalidInput);
     }
 
-    let document: PolicyDocument =
-        serde_json::from_slice(SOURCE).map_err(|_| PolicyError::InvalidSource)?;
+    let admitted = admit_fixed(SOURCE)?;
     let mut workspace = PolicyWorkspace::new();
-    workspace.set_policy("s14-consent", document);
+    workspace.set_policy("s14-consent", admitted.document().clone());
     let evaluation = workspace
         .evaluate(&EvaluateRequest {
             policy_path: Arc::from("s14-consent"),

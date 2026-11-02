@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use zen_engine::policy::{EvaluateRequest, PolicyWorkspace};
 
 pub mod s14_consent;
+pub mod v2_boolean;
 
 pub fn evaluate_preview(
     policy: &AdmittedPreview,

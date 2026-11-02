@@ -248,10 +248,14 @@ def check(root: Path, base: str, candidate: str, bootstrap: bool = False, check_
             source = show(root, candidate, path).decode("utf-8", "strict")
             if re.search(r"\binclude\s*!\s*\(|#\s*\[\s*path\s*=|(?:\.\./)+core/[^\"\s]*/src/", source):
                 errors.append(f"extension uses a forbidden private-source mechanism: {path}")
+    for path in sorted(set(manifest["protectedControls"]) - candidate_tree.keys()):
+        errors.append(f"candidate protected control missing: {path}")
     for entry in manifest["changes"]:
         for path in entry["tests"]:
             if path not in candidate_tree:
                 errors.append(f"missing invariant test: {path}")
+            elif candidate_tree[path][:2] not in (("100644", "blob"), ("100755", "blob")):
+                errors.append(f"unsafe invariant test file type or mode: {path}")
     if upstream != previous_upstream:
         for path in sorted(changed(base_tree, candidate_tree)):
             if any(in_dir(path, directory) for directory in owned) and path not in declared and path != MANIFEST:

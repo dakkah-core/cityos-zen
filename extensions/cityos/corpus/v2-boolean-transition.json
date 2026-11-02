@@ -1,0 +1,21 @@
+{
+  "types": [
+    {"typeRef":"bool","kind":"boolean"},
+    {"typeRef":"state","kind":"enum","values":["draft","issued","accepted"]},
+    {"typeRef":"transition","kind":"record","fields":[{"name":"from","typeRef":"state"},{"name":"to","typeRef":"state"}]}
+  ],
+  "behavior": {
+    "schemaVersion":"cityos.behavior-definition.v2",
+    "behaviorId":"fixture:can-issue", "version":"1.0.0", "ownerRef":"fixture:owner",
+    "kind":"decision", "implementation":"generated", "requiredCapabilities":["fixture:issue"],
+    "inputTypeRef":"transition", "resultTypeRef":"bool", "locals":[],
+    "expression":{"nodeId":"matches","typeRef":"bool","kind":"op","operator":"and","args":[
+      {"nodeId":"from-draft","typeRef":"bool","kind":"op","operator":"eq","args":[
+        {"nodeId":"from","typeRef":"state","kind":"ref","source":"input","path":["from"]},
+        {"nodeId":"draft","typeRef":"state","kind":"literal","value":"draft"}]},
+      {"nodeId":"to-issued","typeRef":"bool","kind":"op","operator":"eq","args":[
+        {"nodeId":"to","typeRef":"state","kind":"ref","source":"input","path":["to"]},
+        {"nodeId":"issued","typeRef":"state","kind":"literal","value":"issued"}]}
+    ]}
+  }
+}

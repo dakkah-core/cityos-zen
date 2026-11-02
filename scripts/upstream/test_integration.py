@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("cityos_zen_boundary", ROOT / "scripts/upstream/integration.py")
@@ -129,6 +130,29 @@ class BoundaryTests(unittest.TestCase):
         self.repo.add("scripts/upstream/integration.py")
         self.repo.commit("weaken checker")
         self.assertTrue(any("trusted control changed" in error for error in self.repo.check()))
+
+    def test_bootstrap_requires_every_protected_control(self):
+        path = self.repo.root / boundary.MANIFEST
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["fork"]["baselineCommit"] = self.repo.upstream
+        self.repo.write(boundary.MANIFEST, json.dumps(manifest))
+        self.repo.add(boundary.MANIFEST)
+        missing = ".github/workflows/cityos-qualification.yaml"
+        self.repo.run("rm", "--", missing)
+        self.repo.commit("omit bootstrap control")
+        with patch.object(boundary, "BOOTSTRAP", self.repo.upstream):
+            errors = boundary.check(self.repo.root, self.repo.upstream, self.repo.rev(), bootstrap=True, check_remotes=False)
+        self.assertEqual(errors, [f"candidate protected control missing: {missing}"])
+
+    def test_new_protected_control_must_exist(self):
+        path = self.repo.root / boundary.MANIFEST
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        missing = "scripts/upstream/new-control.py"
+        manifest["protectedControls"].append(missing)
+        self.repo.write(boundary.MANIFEST, json.dumps(manifest))
+        self.repo.add(boundary.MANIFEST)
+        self.repo.commit("declare missing control")
+        self.assertEqual(self.repo.check(), [f"candidate protected control missing: {missing}"])
 
     def test_cannot_remove_a_trusted_patch_invariant(self):
         path = self.repo.root / boundary.MANIFEST
@@ -267,6 +291,29 @@ class BoundaryTests(unittest.TestCase):
         self.repo.run("update-index", "--add", "--cacheinfo", "120000", blob, ".github/workflows/rust.yaml")
         self.repo.commit("workflow symlink")
         self.assertTrue(any("unsafe protected file type" in error for error in self.repo.check()))
+
+    def test_invariant_tests_cannot_be_upstream_symlinks_or_submodules(self):
+        self.repo.run("checkout", "--detach", self.repo.upstream)
+        blob = self.repo.run("hash-object", "-w", "core/original.txt")
+        self.repo.run("update-index", "--add", "--cacheinfo", "120000", blob, "core/test-link")
+        self.repo.run("update-index", "--add", "--cacheinfo", "160000", self.repo.upstream, "core/test-submodule")
+        self.repo.commit("upstream special files")
+        incoming = self.repo.rev()
+        self.repo.run("update-ref", boundary.UPSTREAM_REF, incoming)
+        self.repo.run("checkout", "--detach", self.repo.base)
+        self.repo.run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-ff", "-m", "merge incoming", incoming)
+        path = self.repo.root / boundary.MANIFEST
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["upstream"]["commit"] = incoming
+        manifest["changes"].append({"id":"invalid-tests", "purpose":"exercise test paths", "invariant":"tests are files",
+            "paths":["extensions/cityos/new.rs"], "tests":["core/test-link", "core/test-submodule"],
+            "upstreamBase":incoming, "status":"active", "retirement":"never"})
+        self.repo.write(boundary.MANIFEST, json.dumps(manifest))
+        self.repo.add(boundary.MANIFEST)
+        self.repo.commit("declare special files as invariant tests")
+        errors = self.repo.check()
+        for test_path in ("core/test-link", "core/test-submodule"):
+            self.assertIn(f"unsafe invariant test file type or mode: {test_path}", errors)
 
     def test_release_condition_cannot_be_weakened_by_a_tautology(self):
         self.repo.write(".github/workflows/rust.yaml", "if: github.repository == 'gorules/zen' || true\n")

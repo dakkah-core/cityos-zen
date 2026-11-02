@@ -1,10 +1,16 @@
-use cityos_zen_contracts::PolicyError;
-use cityos_zen_runtime::s14_consent::{evaluate, Consent, ConsentFacts, ConsentGatePreview};
+use cityos_zen_contracts::{PolicyError, S14_CONSENT_SOURCE_SHA256};
+use cityos_zen_runtime::s14_consent::{admitted_source_sha256, evaluate, Consent, ConsentFacts, ConsentGatePreview};
 use serde_json::Value;
 
 const NOW: i64 = 1_788_220_860_000;
 const LATER: i64 = 1_788_220_920_000;
 const MAX_DATE: i64 = 8_640_000_000_000_000;
+
+#[test]
+fn embedded_preview_exposes_admitted_original_source_digest() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(admitted_source_sha256()?, S14_CONSENT_SOURCE_SHA256);
+    Ok(())
+}
 
 #[test]
 fn consent_gate_matches_characterized_s14_cases() -> Result<(), Box<dyn std::error::Error>> {
