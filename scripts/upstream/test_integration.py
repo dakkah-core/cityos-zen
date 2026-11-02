@@ -119,6 +119,115 @@ class BoundaryTests(unittest.TestCase):
         self.repo.commit("self declare core patch")
         self.assertTrue(any("undeclared upstream modification" in error for error in self.repo.check()))
 
+    def establish_declared_patch_base(self):
+        """Build the declaration and same-upstream patch as separate bases."""
+        manifest_path = self.repo.root / boundary.MANIFEST
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["changes"].append({
+            "id": "core-patch", "purpose": "maintain a CityOS patch",
+            "invariant": "the patch remains present", "paths": ["core/original.txt"],
+            "tests": ["scripts/upstream/patch_invariant.py"],
+            "upstreamBase": self.repo.upstream, "status": "active", "retirement": "when unnecessary",
+        })
+        self.repo.write(boundary.MANIFEST, json.dumps(manifest))
+        self.repo.write("scripts/upstream/patch_invariant.py", "# invariant test\n")
+        self.repo.add(boundary.MANIFEST)
+        self.repo.add("scripts/upstream/patch_invariant.py")
+        self.repo.commit("declare patch without changing upstream code")
+        self.assertEqual(self.repo.check(), [])
+        self.repo.base = self.repo.rev()
+
+        self.repo.write("core/original.txt", "CityOS patch\n")
+        self.repo.add("core/original.txt")
+        self.repo.commit("apply previously declared patch")
+        self.assertEqual(self.repo.check(), [])
+        self.repo.base = self.repo.rev()
+
+    def check_upstream_change(self, path, operation, upstream_replaces_patch=False):
+        self.establish_declared_patch_base()
+        self.repo.run("checkout", "--detach", self.repo.upstream)
+        self.repo.write("core/incoming.txt", "upstream update\n")
+        self.repo.add("core/incoming.txt")
+        if upstream_replaces_patch:
+            self.repo.write("core/original.txt", "upstream replacement\n")
+            self.repo.add("core/original.txt")
+        self.repo.commit("advance upstream")
+        incoming = self.repo.rev()
+        self.repo.run("update-ref", boundary.UPSTREAM_REF, incoming)
+        self.repo.run("checkout", "--detach", self.repo.base)
+        self.repo.run("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                      "merge", "--no-ff", "-s", "ours", "-m", "integrate upstream", incoming)
+        self.repo.write("core/incoming.txt", "upstream update\n")
+        self.repo.add("core/incoming.txt")
+
+        if operation == "preserve":
+            pass
+        elif operation == "edit":
+            self.repo.write(path, "upstream replacement\n" if upstream_replaces_patch else "changed\n")
+            self.repo.add(path)
+        elif operation == "delete":
+            self.repo.run("rm", "--", path)
+        elif operation == "rename":
+            self.repo.run("mv", "--", path, path + ".renamed")
+        elif operation == "mode":
+            self.repo.run("update-index", "--chmod=+x", "--", path)
+        elif operation == "symlink":
+            blob = self.repo.run("hash-object", "-w", path)
+            self.repo.run("update-index", "--add", "--cacheinfo", "120000", blob, path)
+        else:
+            raise AssertionError(f"unknown operation: {operation}")
+
+        manifest_path = self.repo.root / boundary.MANIFEST
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["upstream"]["commit"] = incoming
+        self.repo.write(boundary.MANIFEST, json.dumps(manifest))
+        self.repo.add(boundary.MANIFEST)
+        self.repo.commit("record upstream integration")
+        errors = self.repo.check()
+        if operation == "preserve":
+            self.assertEqual(errors, [])
+        else:
+            self.assertIn(f"upstream integration changed trusted patch or invariant test: {path}", errors)
+
+    def test_same_upstream_allows_predeclared_patch_change(self):
+        self.establish_declared_patch_base()
+
+    def test_upstream_update_allows_preserving_trusted_patch(self):
+        self.check_upstream_change("core/original.txt", "preserve", upstream_replaces_patch=True)
+
+    def test_upstream_replacement_cannot_erase_trusted_patch(self):
+        self.check_upstream_change("core/original.txt", "edit", upstream_replaces_patch=True)
+
+    def test_upstream_update_cannot_edit_trusted_patch(self):
+        self.check_upstream_change("core/original.txt", "edit")
+
+    def test_upstream_update_cannot_delete_trusted_patch(self):
+        self.check_upstream_change("core/original.txt", "delete")
+
+    def test_upstream_update_cannot_rename_trusted_patch(self):
+        self.check_upstream_change("core/original.txt", "rename")
+
+    def test_upstream_update_cannot_change_trusted_patch_mode(self):
+        self.check_upstream_change("core/original.txt", "mode")
+
+    def test_upstream_update_cannot_replace_trusted_patch_with_symlink(self):
+        self.check_upstream_change("core/original.txt", "symlink")
+
+    def test_upstream_update_cannot_edit_trusted_invariant_test(self):
+        self.check_upstream_change("scripts/upstream/patch_invariant.py", "edit")
+
+    def test_upstream_update_cannot_delete_trusted_invariant_test(self):
+        self.check_upstream_change("scripts/upstream/patch_invariant.py", "delete")
+
+    def test_upstream_update_cannot_rename_trusted_invariant_test(self):
+        self.check_upstream_change("scripts/upstream/patch_invariant.py", "rename")
+
+    def test_upstream_update_cannot_change_trusted_invariant_test_mode(self):
+        self.check_upstream_change("scripts/upstream/patch_invariant.py", "mode")
+
+    def test_upstream_update_cannot_replace_trusted_invariant_test_with_symlink(self):
+        self.check_upstream_change("scripts/upstream/patch_invariant.py", "symlink")
+
     def test_private_source_inclusion_is_rejected(self):
         self.repo.write("extensions/cityos/feature.rs", 'include!("../../core/engine/src/lib.rs");\n')
         self.repo.add("extensions/cityos/feature.rs")

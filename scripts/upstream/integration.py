@@ -257,6 +257,14 @@ def check(root: Path, base: str, candidate: str, bootstrap: bool = False, check_
             elif candidate_tree[path][:2] not in (("100644", "blob"), ("100755", "blob")):
                 errors.append(f"unsafe invariant test file type or mode: {path}")
     if upstream != previous_upstream:
+        # A routine upstream integration must retain the exact patch and test
+        # files trusted at its base, even when upstream supplies new bytes for
+        # a declared path. Same-upstream CityOS patch work remains permitted.
+        if MANIFEST in base_tree:
+            preserved = {path for entry in trusted["changes"] for field in ("paths", "tests") for path in entry[field]}
+            for path in sorted(preserved):
+                if path in base_tree and base_tree.get(path) != candidate_tree.get(path):
+                    errors.append(f"upstream integration changed trusted patch or invariant test: {path}")
         for path in sorted(changed(base_tree, candidate_tree)):
             if any(in_dir(path, directory) for directory in owned) and path not in declared and path != MANIFEST:
                 errors.append(f"upstream integration changed owned path without declaration: {path}")

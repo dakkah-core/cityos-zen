@@ -22,6 +22,7 @@ use zen_expression::lexer::{ComparisonOperator, Lexer, LogicalOperator, Operator
 use zen_expression::parser::{Node, Parser};
 
 pub mod s14_consent;
+pub mod s14_rules;
 pub mod v2_boolean;
 
 // Bound parser work before constructing or traversing an expression AST.

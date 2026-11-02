@@ -11,6 +11,8 @@ use cityos_zen_runtime::s14_consent::{self, Consent, ConsentFacts, ConsentGatePr
 use serde::Deserialize;
 use serde_json::json;
 
+mod s14_rule_preview;
+
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod inherited_fds;
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
@@ -130,6 +132,7 @@ fn main() -> ExitCode {
     let result = match mode.as_deref().and_then(std::ffi::OsStr::to_str) {
         Some("--preview-stdio") => preview(),
         Some("--s14-consent-preview-stdio") => s14_consent_preview(),
+        Some("--s14-rule-preview-stdio") => s14_rule_preview::preview(),
         #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
         Some("--supervised-preview-stdio") => supervisor::preview(),
         #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
