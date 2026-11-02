@@ -8,8 +8,8 @@
 //! be forwarded by a caller when cleanup fails.
 //!
 //! The polling count and read size are bounded, not the duration of backend
-//! calls or kernel scheduling. Callers must arrange any necessary wait between
-//! reads and separately reap children. No automatic cleanup is attempted on
+//! calls, the caller-supplied wait, or kernel scheduling. Callers must choose
+//! the wait policy and separately reap children. No automatic cleanup is attempted on
 //! drop: failures must be handled by the owner of the cgroup.
 
 const MAX_EVENTS_BYTES: usize = 4096;
@@ -36,7 +36,7 @@ pub(crate) trait CgroupCleanupIo {
 #[cfg(target_os = "linux")]
 pub(crate) mod linux {
     use super::CgroupCleanupIo;
-    use nix::sys::statfs::{fstatfs, CGROUP2_SUPER_MAGIC};
+    use nix::sys::statfs::{CGROUP2_SUPER_MAGIC, fstatfs};
     use rustix::fs::{self, FileType, Mode, OFlags, ResolveFlags};
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -69,6 +69,12 @@ pub(crate) mod linux {
         Ok(fstatfs(fd).map_err(|_| ())?.filesystem_type() == CGROUP2_SUPER_MAGIC)
     }
 
+    fn close_on_exec(fd: &impl AsFd) -> Result<bool, ()> {
+        Ok(rustix::io::fcntl_getfd(fd)
+            .map_err(|_| ())?
+            .contains(rustix::io::FdFlags::CLOEXEC))
+    }
+
     pub(crate) struct LinuxCgroupCleanup {
         // Keep the independently supplied directory alive for the whole use.
         _directory: OwnedFd,
@@ -79,12 +85,13 @@ pub(crate) mod linux {
     }
 
     impl LinuxCgroupCleanup {
-        /// Consumes the independently trusted directory descriptor. No path is
-        /// accepted. This verifies filesystem/type, not identity or custody.
+        /// Consumes a close-on-exec, independently trusted directory descriptor.
+        /// This verifies filesystem/type, not identity or custody of aliases.
         pub(crate) fn new(directory: OwnedFd) -> Result<Self, ()> {
             let dir_stat = fs::fstat(&directory).map_err(|_| ())?;
             if FileType::from_raw_mode(dir_stat.st_mode) != FileType::Directory
                 || !is_cgroup2(&directory)?
+                || !close_on_exec(&directory)?
             {
                 return Err(());
             }
@@ -95,6 +102,7 @@ pub(crate) mod linux {
                 if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
                     || stat.st_dev != dir_stat.st_dev
                     || !is_cgroup2(control)?
+                    || !close_on_exec(control)?
                 {
                     return Err(());
                 }
@@ -151,9 +159,22 @@ pub(crate) mod linux {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         #[test]
+        fn distinguishes_inheritable_descriptors() -> Result<(), Box<dyn std::error::Error>> {
+            let directory = File::open(std::env::temp_dir())?;
+            assert!(close_on_exec(&directory).map_err(|_| "read flags failed")?);
+            rustix::io::fcntl_setfd(&directory, rustix::io::FdFlags::empty())?;
+            let inheritable = close_on_exec(&directory).map_err(|_| "read flags failed")?;
+            rustix::io::fcntl_setfd(&directory, rustix::io::FdFlags::CLOEXEC)?;
+            assert!(!inheritable);
+            assert!(close_on_exec(&directory).map_err(|_| "read flags failed")?);
+            Ok(())
+        }
+
+        #[test]
         fn fixed_control_open_rejects_symlinks() -> Result<(), Box<dyn std::error::Error>> {
             let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-            let path = std::env::temp_dir().join(format!("cityos-cgroup-open-{}-{nonce}", std::process::id()));
+            let path = std::env::temp_dir()
+                .join(format!("cityos-cgroup-open-{}-{nonce}", std::process::id()));
             std::fs::create_dir(&path)?;
             let events = path.join("cgroup.events");
             let target = path.join("target");
@@ -175,10 +196,11 @@ pub(crate) mod linux {
         }
 
         #[test]
-        fn adapter_reads_are_bounded_and_require_one_successful_kill(
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        fn adapter_reads_are_bounded_and_require_one_successful_kill()
+        -> Result<(), Box<dyn std::error::Error>> {
             let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-            let path = std::env::temp_dir().join(format!("cityos-cgroup-io-{}-{nonce}", std::process::id()));
+            let path = std::env::temp_dir()
+                .join(format!("cityos-cgroup-io-{}-{nonce}", std::process::id()));
             std::fs::create_dir(&path)?;
             let kill_path = path.join("cgroup.kill");
             let events_path = path.join("cgroup.events");
@@ -197,10 +219,14 @@ pub(crate) mod linux {
             assert!(io.read_events(&mut bytes).is_err());
             assert!(io.kill_all().is_ok());
             assert!(io.kill_all().is_err());
-            let count = io.read_events(&mut bytes).map_err(|_| "events read failed")?;
+            let count = io
+                .read_events(&mut bytes)
+                .map_err(|_| "events read failed")?;
             assert_eq!(&bytes[..count], b"populated 1\n");
             std::fs::write(&events_path, b"populated 0\n")?;
-            let count = io.read_events(&mut bytes).map_err(|_| "events reread failed")?;
+            let count = io
+                .read_events(&mut bytes)
+                .map_err(|_| "events reread failed")?;
             assert_eq!(&bytes[..count], b"populated 0\n");
             assert!(io.read_events(&mut [0u8; 12]).is_err());
             drop(io);
@@ -217,22 +243,26 @@ pub(crate) enum CleanupError {
     InvalidPollLimit,
     KillFailed,
     ReadFailed,
+    WaitFailed,
     InvalidEvents,
     StillPopulated,
 }
 
 /// Request a recursive kill once, then make at most `poll_limit` observations.
 /// Success only records that the adapter observed `populated 0` after the kill.
+/// The caller-supplied wait runs between populated observations, never after the
+/// final observation. A failed wait is a cleanup failure; it must not be ignored.
 pub(crate) fn kill_and_observe_empty(
     io: &mut impl CgroupCleanupIo,
     poll_limit: usize,
+    mut wait: impl FnMut() -> Result<(), ()>,
 ) -> Result<(), CleanupError> {
     if !(1..=MAX_POLLS).contains(&poll_limit) {
         return Err(CleanupError::InvalidPollLimit);
     }
     io.kill_all().map_err(|_| CleanupError::KillFailed)?;
     let mut buffer = [0u8; MAX_EVENTS_BYTES];
-    for _ in 0..poll_limit {
+    for observation in 0..poll_limit {
         let len = io
             .read_events(&mut buffer)
             .map_err(|_| CleanupError::ReadFailed)?;
@@ -243,6 +273,9 @@ pub(crate) fn kill_and_observe_empty(
         }
         if !populated(&buffer[..len])? {
             return Ok(());
+        }
+        if observation + 1 < poll_limit {
+            wait().map_err(|_| CleanupError::WaitFailed)?;
         }
     }
     Err(CleanupError::StillPopulated)
@@ -260,7 +293,9 @@ fn populated(bytes: &[u8]) -> Result<bool, CleanupError> {
         let key = fields.next().ok_or(CleanupError::InvalidEvents)?;
         let value = fields.next().ok_or(CleanupError::InvalidEvents)?;
         if fields.next().is_some()
-            || !key.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
             || value.is_empty()
             || !value.bytes().all(|byte| byte.is_ascii_digit())
         {
