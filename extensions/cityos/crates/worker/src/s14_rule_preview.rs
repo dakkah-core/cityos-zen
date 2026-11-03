@@ -10,9 +10,57 @@ use cityos_zen_runtime::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
-const KIND: &str = "s14-rule-preview";
+pub(crate) const KIND: &str = "s14-rule-preview";
 const MAX_BYTES: u64 = 131_072;
-const MAX_OUTPUT_BYTES: usize = 131_072;
+pub(crate) const MAX_OUTPUT_BYTES: usize = 131_072;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CheckedResponse {
+    kind: String,
+    profile: String,
+    selector_document_sha256: String,
+    consent_source_sha256: String,
+    effect: RuleEffect,
+    reason_code: String,
+    matched_rule_ids: Vec<String>,
+    #[serde(deserialize_with = "required_option")]
+    explicit_deny_reason: Option<String>,
+}
+
+fn required_option<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Option::deserialize(d)
+}
+
+/// Validate the complete, untrusted child response before forwarding any bytes.
+pub(crate) fn validate_response(bytes: &[u8]) -> Result<(), PolicyError> {
+    if bytes.len() > MAX_OUTPUT_BYTES
+        || bytes.iter().copied().find(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n')) != Some(b'{')
+    {
+        return Err(PolicyError::Evaluation);
+    }
+    let response: CheckedResponse = serde_json::from_slice(bytes).map_err(|_| PolicyError::Evaluation)?;
+    if response.kind != KIND || response.profile != s14_decision::PROFILE
+        || response.selector_document_sha256 != s14_decision::selector_document_sha256()?
+        || response.consent_source_sha256 != S14_CONSENT_SOURCE_SHA256
+        || response.reason_code.len() > s14_decision::MAX_STRING_BYTES
+        || response.matched_rule_ids.len() > s14_decision::MAX_RULES
+        || response.matched_rule_ids.iter().any(|id| id.len() > s14_decision::MAX_STRING_BYTES)
+        || response.explicit_deny_reason.as_ref().is_some_and(|s| s.len() > s14_decision::MAX_STRING_BYTES)
+    {
+        return Err(PolicyError::Evaluation);
+    }
+    let shape_ok = match response.effect {
+        RuleEffect::Allow => response.explicit_deny_reason.is_none() && response.matched_rule_ids.len() == 1,
+        RuleEffect::Deny => match response.reason_code.as_str() {
+            "EXPLICIT_DENY" => response.explicit_deny_reason.is_some() && response.matched_rule_ids.len() == 1,
+            "CONSENT_NOT_GRANTED" => response.explicit_deny_reason.is_none() && !response.matched_rule_ids.is_empty(),
+            "NO_MATCHING_ALLOW" => response.explicit_deny_reason.is_none() && response.matched_rule_ids.is_empty(),
+            _ => false,
+        },
+    };
+    if shape_ok { Ok(()) } else { Err(PolicyError::Evaluation) }
+}
 
 // Derived serde structs accept positional sequences by default. Require maps
 // at every structured level without first decoding to a lossy JSON Value.
@@ -176,4 +224,50 @@ pub fn preview() -> Result<(), PolicyError> {
         .write_all(&output)
         .and_then(|_| stdout.write_all(b"\n"))
         .map_err(|_| PolicyError::Evaluation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn supervisor_response_requires_exact_unambiguous_identity_and_shape() -> Result<(), Box<dyn std::error::Error>> {
+        let valid = json!({
+            "kind": KIND, "profile": s14_decision::PROFILE,
+            "selectorDocumentSha256": s14_decision::selector_document_sha256()?,
+            "consentSourceSha256": S14_CONSENT_SOURCE_SHA256,
+            "effect": "deny", "reasonCode": "EXPLICIT_DENY",
+            "matchedRuleIds": ["rule-1"], "explicitDenyReason": "NO"
+        });
+        let bytes = serde_json::to_vec(&valid)?;
+        assert!(validate_response(&bytes).is_ok());
+        let text = String::from_utf8(bytes)?;
+        let mut invalid = vec![
+            text.replacen("\"kind\":", "\"kind\":\"s14-rule-preview\",\"kind\":", 1),
+            text.replace(s14_decision::PROFILE, "wrong-profile"),
+            text.replace(S14_CONSENT_SOURCE_SHA256, &"0".repeat(64)),
+            text.replace(&s14_decision::selector_document_sha256()?, &"0".repeat(64)),
+            text.replacen("\"effect\":\"deny\"", "\"effect\":\"other\"", 1),
+            format!("{text} {{}}"),
+            format!("[{text}]") ,
+        ];
+        let mut bad = valid.clone();
+        if let Some(object) = bad.as_object_mut() { object.remove("explicitDenyReason"); }
+        invalid.push(serde_json::to_string(&bad)?);
+        bad = valid.clone();
+        bad["extra"] = json!(true);
+        invalid.push(serde_json::to_string(&bad)?);
+        bad = valid.clone();
+        bad["explicitDenyReason"] = json!(null);
+        invalid.push(serde_json::to_string(&bad)?);
+        bad = valid.clone();
+        bad["matchedRuleIds"] = json!(vec!["id"; s14_decision::MAX_RULES + 1]);
+        invalid.push(serde_json::to_string(&bad)?);
+        bad = valid;
+        bad["matchedRuleIds"] = json!(["x".repeat(s14_decision::MAX_STRING_BYTES + 1)]);
+        invalid.push(serde_json::to_string(&bad)?);
+        for value in invalid { assert!(validate_response(value.as_bytes()).is_err(), "{value}"); }
+        Ok(())
+    }
 }

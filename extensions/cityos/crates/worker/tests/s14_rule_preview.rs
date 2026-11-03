@@ -16,19 +16,108 @@ fn request() -> Value {
     })
 }
 fn run(input: &[u8]) -> Result<Output, Box<dyn std::error::Error>> {
+    run_mode("--s14-rule-preview-stdio", input)
+}
+fn run_mode(mode: &str, input: &[u8]) -> Result<Output, Box<dyn std::error::Error>> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_cityos-zen-worker"))
-        .arg("--s14-rule-preview-stdio")
+        .arg(mode)
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child
+    let written = child
         .stdin
         .take()
         .ok_or("missing stdin")?
-        .write_all(input)?;
-    Ok(child.wait_with_output()?)
+        .write_all(input);
+    let output = child.wait_with_output()?;
+    if output.status.success() { written?; }
+    Ok(output)
+}
+
+#[test]
+fn supervised_rule_mode_matches_preview_or_is_unavailable_without_output() -> Result<(), Box<dyn std::error::Error>> {
+    let mut input = request();
+    input["rules"] = json!((0..600).map(|i| json!({
+        "ruleId":format!("rule-{i:04}-long-id"), "effect":"allow",
+        "requiresConsent":true, "reasonCode":"OK"
+    })).collect::<Vec<_>>());
+    let bytes = serde_json::to_vec(&input)?;
+    let expected = run(&bytes)?;
+    assert!(expected.status.success());
+    assert!(expected.stdout.len() > 4096);
+    let actual = run_mode("--supervised-s14-rule-preview-stdio", &bytes)?;
+    if actual.status.success() {
+        assert_eq!(actual.stdout, expected.stdout);
+    } else {
+        // Namespace support and permissions are deployment-dependent.
+        assert!(actual.stdout.is_empty());
+    }
+    assert!(actual.stderr.is_empty());
+    Ok(())
+}
+
+#[test]
+fn supervised_rule_rejects_malformed_input_without_a_result() -> Result<(), Box<dyn std::error::Error>> {
+    let output = run_mode("--supervised-s14-rule-preview-stdio", b"{invalid")?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+#[test]
+fn supervised_rule_never_waits_indefinitely_for_input_eof() -> Result<(), Box<dyn std::error::Error>> {
+    use std::{thread, time::{Duration, Instant}};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cityos-zen-worker"))
+        .arg("--supervised-s14-rule-preview-stdio")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let until = Instant::now() + Duration::from_secs(8);
+    loop {
+        if child.try_wait()?.is_some() { break; }
+        if Instant::now() >= until {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("supervised rule worker did not honor its deadline".into());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output()?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+#[test]
+fn supervised_rule_rejects_inherited_socket_stdin() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::net::UnixStream;
+    let (socket, _peer) = UnixStream::pair()?;
+    let input = std::fs::File::from(std::os::fd::OwnedFd::from(socket));
+    let result = Command::new(env!("CARGO_BIN_EXE_cityos-zen-worker"))
+        .arg("--supervised-s14-rule-preview-stdio").stdin(Stdio::from(input))
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).output()?;
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(result.stderr.is_empty());
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+#[test]
+fn restricted_rule_child_rejects_inherited_environment_before_input() -> Result<(), Box<dyn std::error::Error>> {
+    let child = Command::new(env!("CARGO_BIN_EXE_cityos-zen-worker"))
+        .arg("--restricted-s14-rule-preview-stdio")
+        .env_clear().env("CITYOS_TEST_CREDENTIAL", "synthetic")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let output = child.wait_with_output()?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    Ok(())
 }
 fn evaluate(input: &Value) -> Result<Value, Box<dyn std::error::Error>> {
     let output = run(&serde_json::to_vec(input)?)?;

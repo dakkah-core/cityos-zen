@@ -50,7 +50,7 @@ fn child_status(pid: Pid) -> Result<WaitStatus, ()> {
 // A descendant can leave the group; this is cleanup, not containment. Only the
 // direct child is ours to reap. Another child-reaper in this process would
 // invalidate the PID reservation and is incompatible with this supervisor.
-fn cleanup(mut child: Child, pid: Pid) -> Result<(), ()> {
+fn cleanup(mut child: Child, pid: Pid) -> Result<bool, ()> {
     let status = child_status(pid)?;
     let exited = !matches!(status, WaitStatus::StillAlive);
     let signalled = match killpg(pid, Signal::SIGKILL) {
@@ -74,7 +74,7 @@ fn cleanup(mut child: Child, pid: Pid) -> Result<(), ()> {
             match child.try_wait() {
                 Ok(Some(_)) => {
                     return if signalled && direct_stopped {
-                        Ok(())
+                        Ok(true)
                     } else {
                         Err(())
                     }
@@ -95,9 +95,11 @@ fn cleanup(mut child: Child, pid: Pid) -> Result<(), ()> {
                 let _ = child.wait();
             })
             .map_err(|_| ())?;
+        // A background waiter does not establish that the child was reaped.
+        return if signalled && direct_stopped { Ok(false) } else { Err(()) };
     }
     if signalled && direct_stopped {
-        Ok(())
+        Ok(true)
     } else {
         Err(())
     }
@@ -106,10 +108,10 @@ fn cleanup(mut child: Child, pid: Pid) -> Result<(), ()> {
 // Input is inherited so the same deadline covers a caller that never closes it.
 #[cfg(test)]
 fn supervise(command: &mut Command, deadline: Duration) -> Result<Vec<u8>, ()> {
-    supervise_from(command, Instant::now(), deadline)
+    supervise_from(command, Instant::now(), deadline, MAX_RESPONSE_BYTES, false)
 }
 
-fn supervise_from(command: &mut Command, started: Instant, deadline: Duration) -> Result<Vec<u8>, ()> {
+fn supervise_from(command: &mut Command, started: Instant, deadline: Duration, max_output: u64, require_reaped: bool) -> Result<Vec<u8>, ()> {
     let mut child = command
         .process_group(0)
         .stdout(Stdio::piped())
@@ -147,7 +149,7 @@ fn supervise_from(command: &mut Command, started: Instant, deadline: Duration) -
                     Ok(0) => eof = true,
                     Ok(n) => {
                         output.extend_from_slice(&buffer[..n]);
-                        if output.len() as u64 > MAX_RESPONSE_BYTES {
+                        if output.len() as u64 > max_output {
                             return Err(());
                         }
                     }
@@ -166,7 +168,10 @@ fn supervise_from(command: &mut Command, started: Instant, deadline: Duration) -
     })();
     // Also signal the group after success, before releasing the child's PID.
     // Never return partial output or a result if cleanup could not be initiated.
-    cleanup(child, pid)?;
+    let reaped = cleanup(child, pid)?;
+    if require_reaped && !reaped {
+        return Err(());
+    }
     result
 }
 
@@ -181,6 +186,14 @@ pub(crate) fn s14_consent_preview() -> Result<(), PolicyError> {
     )
 }
 
+/// Bounded S14 calculation; no owner facts, receipt or qualification is implied.
+pub(crate) fn s14_rule_preview() -> Result<(), PolicyError> {
+    let started = Instant::now();
+    // Do not let a network socket or a credential-bearing file become stdin.
+    require_anonymous_pipe(io::stdin().as_raw_fd(), nix::libc::O_RDONLY)?;
+    supervised_preview_from("--restricted-s14-rule-preview-stdio", ResponseProfile::S14Rule, started)
+}
+
 /// Experimental namespace setup, not a credential boundary or sandbox.
 pub(crate) fn experimental_network_preview() -> Result<(), PolicyError> {
     supervised_preview("--experimental-network-child-stdio", ResponseProfile::Cart)
@@ -190,6 +203,7 @@ pub(crate) fn experimental_network_preview() -> Result<(), PolicyError> {
 enum ResponseProfile {
     Cart,
     S14Consent,
+    S14Rule,
 }
 
 fn validate_response(bytes: &[u8], profile: ResponseProfile) -> Result<(), PolicyError> {
@@ -218,6 +232,7 @@ fn validate_response(bytes: &[u8], profile: ResponseProfile) -> Result<(), Polic
                 return Err(PolicyError::Evaluation);
             }
         }
+        ResponseProfile::S14Rule => crate::s14_rule_preview::validate_response(bytes)?,
     }
     Ok(())
 }
@@ -237,7 +252,12 @@ fn supervised_response_from(
     deadline: Duration,
     profile: ResponseProfile,
 ) -> Result<Vec<u8>, PolicyError> {
-    let bytes = supervise_from(command, started, deadline).map_err(|_| PolicyError::Evaluation)?;
+    let limit = match profile {
+        ResponseProfile::S14Rule => crate::s14_rule_preview::MAX_OUTPUT_BYTES as u64,
+        _ => MAX_RESPONSE_BYTES,
+    };
+    let bytes = supervise_from(command, started, deadline, limit, matches!(profile, ResponseProfile::S14Rule))
+        .map_err(|_| PolicyError::Evaluation)?;
     validate_response(&bytes, profile)?;
     Ok(bytes)
 }
@@ -251,27 +271,38 @@ fn supervised_response_from(
 // fail closed. As elsewhere in this supervisor, the process must not
 // concurrently replace the fd or change its flags; other pipe writers can
 // write independently. Syscall scheduling/kernel stalls are not time-bounded.
-// Linux guarantees nonblocking writes of at most PIPE_BUF (4096) are atomic:
-// either the whole response is delivered or no response bytes are delivered.
-fn forward_pipe(fd: RawFd, bytes: &[u8], started: Instant, deadline: Duration) -> Result<(), ()> {
-    if bytes.is_empty() || bytes.len() > 4096 || started.elapsed() >= deadline {
-        return Err(());
-    }
-    let flags = fcntl(fd, FcntlArg::F_GETFL).map_err(|_| ())?;
-    if flags & nix::libc::O_ACCMODE != nix::libc::O_WRONLY
+// Each nonblocking write of at most PIPE_BUF (4096) is atomic on Linux.
+// Rule responses larger than PIPE_BUF require multiple writes and may be
+// partially delivered on timeout or disconnect. Their consumer must require
+// a successful supervisor exit and complete JSON/EOF before using any bytes.
+fn require_anonymous_pipe(fd: RawFd, access: i32) -> Result<(), PolicyError> {
+    let flags = fcntl(fd, FcntlArg::F_GETFL).map_err(|_| PolicyError::Evaluation)?;
+    if flags & nix::libc::O_ACCMODE != access
         || flags & nix::libc::O_DIRECT != 0
     {
-        return Err(());
+        return Err(PolicyError::Evaluation);
     }
     let path = format!("/proc/self/fd/{fd}");
-    let target = std::fs::read_link(&path).map_err(|_| ())?;
+    let target = std::fs::read_link(&path).map_err(|_| PolicyError::Evaluation)?;
     if !target.to_str().is_some_and(|name| name.starts_with("pipe:[") && name.ends_with(']')) {
-        return Err(());
+        return Err(PolicyError::Evaluation);
     }
-    let original = std::fs::metadata(&path).map_err(|_| ())?;
+    let original = std::fs::metadata(&path).map_err(|_| PolicyError::Evaluation)?;
     if !original.file_type().is_fifo() {
-        return Err(());
+        return Err(PolicyError::Evaluation);
     }
+    Ok(())
+}
+
+fn forward_pipe(fd: RawFd, bytes: &[u8], started: Instant, deadline: Duration) -> Result<(), ()> {
+    forward_pipe_bounded(fd, bytes, started, deadline, 4096)
+}
+
+fn forward_pipe_bounded(fd: RawFd, bytes: &[u8], started: Instant, deadline: Duration, limit: usize) -> Result<(), ()> {
+    if bytes.is_empty() || bytes.len() > limit || started.elapsed() >= deadline { return Err(()); }
+    require_anonymous_pipe(fd, nix::libc::O_WRONLY).map_err(|_| ())?;
+    let path = format!("/proc/self/fd/{fd}");
+    let original = std::fs::metadata(&path).map_err(|_| ())?;
     let mut pipe = std::fs::OpenOptions::new()
         .write(true)
         .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
@@ -284,13 +315,14 @@ fn forward_pipe(fd: RawFd, bytes: &[u8], started: Instant, deadline: Duration) -
     {
         return Err(());
     }
-    loop {
+    let mut offset = 0;
+    while offset < bytes.len() {
         if started.elapsed() >= deadline {
             return Err(());
         }
-        match pipe.write(bytes) {
-            Ok(n) if n == bytes.len() => return Ok(()),
-            // A short write is not expected under the Linux PIPE_BUF contract.
+        let end = (offset + 4096).min(bytes.len());
+        match pipe.write(&bytes[offset..end]) {
+            Ok(n) if n == end - offset => offset = end,
             Ok(_) => return Err(()),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -299,22 +331,38 @@ fn forward_pipe(fd: RawFd, bytes: &[u8], started: Instant, deadline: Duration) -
             Err(_) => return Err(()),
         }
     }
+    Ok(())
 }
 
+#[cfg(test)]
 fn supervised_forward(
     command: &mut Command,
     deadline: Duration,
     profile: ResponseProfile,
     output_fd: RawFd,
 ) -> Result<(), PolicyError> {
-    let started = Instant::now();
+    supervised_forward_from(command, Instant::now(), deadline, profile, output_fd)
+}
+
+fn supervised_forward_from(
+    command: &mut Command, started: Instant, deadline: Duration,
+    profile: ResponseProfile, output_fd: RawFd,
+) -> Result<(), PolicyError> {
     let bytes = supervised_response_from(command, started, deadline, profile)?;
     // Cleanup and validation finish before forwarding. The same time budget
     // covers collection, cleanup, validation and the nonblocking write.
-    forward_pipe(output_fd, &bytes, started, deadline).map_err(|_| PolicyError::Evaluation)
+    match profile {
+        ResponseProfile::S14Rule => forward_pipe_bounded(output_fd, &bytes, started, deadline,
+            crate::s14_rule_preview::MAX_OUTPUT_BYTES),
+        _ => forward_pipe(output_fd, &bytes, started, deadline),
+    }.map_err(|_| PolicyError::Evaluation)
 }
 
 fn supervised_preview(child_mode: &str, profile: ResponseProfile) -> Result<(), PolicyError> {
+    supervised_preview_from(child_mode, profile, Instant::now())
+}
+
+fn supervised_preview_from(child_mode: &str, profile: ResponseProfile, started: Instant) -> Result<(), PolicyError> {
     let executable = std::env::current_exe().map_err(|_| PolicyError::Evaluation)?;
     let mut command = Command::new(executable);
     command
@@ -322,12 +370,12 @@ fn supervised_preview(child_mode: &str, profile: ResponseProfile) -> Result<(), 
         .env_clear()
         .stdin(Stdio::inherit());
     match profile {
-        ResponseProfile::S14Consent => {
-            supervised_forward(&mut command, DEADLINE, profile, io::stdout().as_raw_fd())
+        ResponseProfile::S14Consent | ResponseProfile::S14Rule => {
+            supervised_forward_from(&mut command, started, DEADLINE, profile, io::stdout().as_raw_fd())
         }
         ResponseProfile::Cart => {
             // Preserve the legacy cart and experimental destination behavior.
-            let bytes = supervised_response_from(&mut command, Instant::now(), DEADLINE, profile)?;
+            let bytes = supervised_response_from(&mut command, started, DEADLINE, profile)?;
             io::stdout().lock().write_all(&bytes).map_err(|_| PolicyError::Evaluation)
         }
     }
@@ -341,6 +389,20 @@ pub(crate) fn restricted_preview() -> Result<(), PolicyError> {
 
 pub(crate) fn restricted_s14_consent_preview() -> Result<(), PolicyError> {
     restricted(crate::s14_consent_preview)
+}
+
+pub(crate) fn restricted_s14_rule_preview() -> Result<(), PolicyError> {
+    // Child stdio must also be pipes when invoked directly; close all other
+    // descriptors before creating the namespace or reading caller input.
+    require_anonymous_pipe(io::stdin().as_raw_fd(), nix::libc::O_RDONLY)?;
+    require_anonymous_pipe(io::stdout().as_raw_fd(), nix::libc::O_WRONLY)?;
+    if std::env::vars_os().next().is_some() { return Err(PolicyError::Evaluation); }
+    match nix::unistd::close(2) {
+        Ok(()) | Err(Errno::EBADF) => {},
+        Err(_) => return Err(PolicyError::Evaluation),
+    }
+    crate::inherited_fds::close_and_verify()?;
+    network_then_preview(crate::network::isolate, || restricted(crate::s14_rule_preview::preview))
 }
 
 fn restricted(preview: impl FnOnce() -> Result<(), PolicyError>) -> Result<(), PolicyError> {
@@ -522,6 +584,53 @@ mod tests {
         ] {
             assert!(validate_response(invalid.as_bytes(), ResponseProfile::S14Consent).is_err());
         }
+    }
+
+    #[test]
+    fn rule_supervisor_collects_large_complete_output_and_rejects_failures() -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::json!({
+            "kind":"s14-rule-preview", "profile":cityos_zen_runtime::s14_decision::PROFILE,
+            "selectorDocumentSha256":cityos_zen_runtime::s14_decision::selector_document_sha256()?,
+            "consentSourceSha256":S14_CONSENT_SOURCE_SHA256, "effect":"deny",
+            "reasonCode":"CONSENT_NOT_GRANTED", "matchedRuleIds":vec!["long-rule-id"; 600],
+            "explicitDenyReason":null,
+        });
+        let output = serde_json::to_string(&value)?;
+        assert!(output.len() > 4096);
+        let mut child = Command::new("/bin/sh");
+        child.args(["-c", "printf '%s' \"$1\"", "test", &output]);
+        assert_eq!(supervised_response(&mut child, Duration::from_secs(3), ResponseProfile::S14Rule)?, output.as_bytes());
+
+        let mut failed = Command::new("/bin/sh");
+        failed.args(["-c", "printf '%s' \"$1\"; exit 1", "test", &output]);
+        assert!(supervised_response(&mut failed, Duration::from_secs(3), ResponseProfile::S14Rule).is_err());
+        let mut slow = Command::new("/bin/sh");
+        slow.args(["-c", "printf '%s' \"$1\"; exec sleep 10", "test", &output]);
+        assert!(supervised_response(&mut slow, Duration::from_millis(100), ResponseProfile::S14Rule).is_err());
+        let mut flood = Command::new("/bin/sh");
+        flood.args(["-c", "while :; do printf 0123456789; done"]);
+        assert!(supervised_response(&mut flood, Duration::from_secs(3), ResponseProfile::S14Rule).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rule_output_above_pipe_buf_is_not_claimed_atomic() -> Result<(), Box<dyn std::error::Error>> {
+        use nix::unistd::pipe;
+        use std::fs::File;
+        let (read_fd, write_fd) = pipe()?;
+        let mut reader = File::from(read_fd);
+        let writer = File::from(write_fd);
+        fcntl(writer.as_raw_fd(), FcntlArg::F_SETPIPE_SZ(4096))?;
+        let bytes = vec![b'x'; 131_072];
+        // With an undrained finite pipe, at least one atomic chunk can be
+        // emitted before the shared deadline; the call must still fail.
+        assert!(forward_pipe_bounded(writer.as_raw_fd(), &bytes, Instant::now(), Duration::from_millis(100), bytes.len()).is_err());
+        drop(writer);
+        let mut partial = Vec::new();
+        reader.read_to_end(&mut partial)?;
+        assert!(!partial.is_empty() && partial.len() < bytes.len());
+        assert_eq!(partial, bytes[..partial.len()]);
+        Ok(())
     }
 
     #[test]

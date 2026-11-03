@@ -35,7 +35,7 @@ pub(crate) trait CgroupCleanupIo {
 /// supervisor dies. This adapter supplies none of those guarantees.
 #[cfg(target_os = "linux")]
 pub(crate) mod linux {
-    use super::CgroupCleanupIo;
+    use super::{CgroupCleanupIo, populated};
     use nix::sys::statfs::{CGROUP2_SUPER_MAGIC, fstatfs};
     use rustix::fs::{self, FileType, Mode, OFlags, ResolveFlags};
     use std::fs::File;
@@ -115,6 +115,27 @@ pub(crate) mod linux {
                 kill_succeeded: false,
             })
         }
+
+        /// Snapshot the subtree before use. This cannot establish exclusive
+        /// custody, prevent later admission, or authorize a launch.
+        pub(crate) fn initially_empty(&mut self) -> Result<bool, ()> {
+            if self.kill_attempted { return Err(()); }
+            let mut buffer = [0u8; super::MAX_EVENTS_BYTES];
+            let count = read_complete(&mut self.events, &mut buffer)?;
+            populated(&buffer[..count]).map(|value| !value).map_err(|_| ())
+        }
+    }
+
+    fn read_complete(file: &mut File, buffer: &mut [u8]) -> Result<usize, ()> {
+        if buffer.is_empty() { return Err(()); }
+        file.seek(SeekFrom::Start(0)).map_err(|_| ())?;
+        let mut used = 0;
+        loop {
+            if used == buffer.len() { return Err(()); }
+            let read = file.read(&mut buffer[used..]).map_err(|_| ())?;
+            if read == 0 { return Ok(used); }
+            used += read;
+        }
     }
 
     impl CgroupCleanupIo for LinuxCgroupCleanup {
@@ -136,19 +157,8 @@ pub(crate) mod linux {
             if !self.kill_succeeded || buffer.is_empty() {
                 return Err(());
             }
-            self.events.seek(SeekFrom::Start(0)).map_err(|_| ())?;
-            let mut used = 0;
-            loop {
-                // Reject an exactly full buffer too: EOF was not observed.
-                if used == buffer.len() {
-                    return Err(());
-                }
-                let read = self.events.read(&mut buffer[used..]).map_err(|_| ())?;
-                if read == 0 {
-                    return Ok(used);
-                }
-                used += read;
-            }
+            // Reject an exactly full buffer too: EOF was not observed.
+            read_complete(&mut self.events, buffer)
         }
     }
 
@@ -216,8 +226,15 @@ pub(crate) mod linux {
                 kill_succeeded: false,
             };
             let mut bytes = [0u8; 64];
+            assert_eq!(io.initially_empty(), Ok(false));
+            std::fs::write(&events_path, b"populated 0\n")?;
+            assert_eq!(io.initially_empty(), Ok(true));
+            std::fs::write(&events_path, b"populated 1\npopulated 0\n")?;
+            assert!(io.initially_empty().is_err());
+            std::fs::write(&events_path, b"populated 1\n")?;
             assert!(io.read_events(&mut bytes).is_err());
             assert!(io.kill_all().is_ok());
+            assert!(io.initially_empty().is_err());
             assert!(io.kill_all().is_err());
             let count = io
                 .read_events(&mut bytes)

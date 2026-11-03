@@ -14,11 +14,19 @@ use serde_json::json;
 mod s14_rule_preview;
 
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+mod cgroup_cleanup;
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+mod cgroup_limits;
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod inherited_fds;
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod network;
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod resource_limits;
+#[cfg(all(target_os = "linux", not(target_env = "uclibc"), any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+mod process_sandbox;
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+mod registered_sandbox;
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod supervisor;
 
@@ -110,7 +118,8 @@ fn s14_consent_preview() -> Result<(), PolicyError> {
 fn main() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1);
     let mode = arguments.next();
-    let bounded_s14 = mode.as_deref() == Some(std::ffi::OsStr::new("--supervised-s14-consent-preview-stdio"));
+    let bounded_s14 = matches!(mode.as_deref().and_then(std::ffi::OsStr::to_str),
+        Some("--supervised-s14-consent-preview-stdio" | "--supervised-s14-rule-preview-stdio" | "--restricted-s14-rule-preview-stdio" | "--sandboxed-s14-rule-stdio"));
     if arguments.next().is_some() {
         if !bounded_s14 {
             eprintln!("cityos-zen-worker: authoritative isolation profile unavailable");
@@ -121,7 +130,12 @@ fn main() -> ExitCode {
     // blocking pipe, including when the mode is unavailable on this platform.
     if bounded_s14 {
         #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
-        return if supervisor::s14_consent_preview().is_ok() {
+        return if match mode.as_deref().and_then(std::ffi::OsStr::to_str) {
+            Some("--supervised-s14-consent-preview-stdio") => supervisor::s14_consent_preview(),
+            Some("--supervised-s14-rule-preview-stdio") => supervisor::s14_rule_preview(),
+            Some("--restricted-s14-rule-preview-stdio") => supervisor::restricted_s14_rule_preview(),
+            _ => Err(PolicyError::Evaluation),
+        }.is_ok() {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
