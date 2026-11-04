@@ -144,13 +144,20 @@ struct Response {
 }
 
 pub fn preview() -> Result<(), PolicyError> {
+    preview_bounded(MAX_BYTES as usize, MAX_OUTPUT_BYTES)
+}
+
+pub(crate) fn preview_bounded(max_request: usize, max_output: usize) -> Result<(), PolicyError> {
+    if max_request == 0 || max_request > MAX_BYTES as usize || max_output == 0 || max_output > MAX_OUTPUT_BYTES {
+        return Err(PolicyError::InvalidInput);
+    }
     let mut bytes = Vec::new();
     io::stdin()
         .lock()
-        .take(MAX_BYTES + 1)
+        .take(max_request as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| PolicyError::InvalidInput)?;
-    if bytes.len() as u64 > MAX_BYTES {
+    if bytes.len() > max_request {
         return Err(PolicyError::InvalidInput);
     }
     let Object(request): Object<Request> =
@@ -216,7 +223,7 @@ pub fn preview() -> Result<(), PolicyError> {
     // Serialize before writing anything so oversized output never becomes a
     // partial successful response. A failed write remains a process error.
     let output = serde_json::to_vec(&response).map_err(|_| PolicyError::Evaluation)?;
-    if output.len() + 1 > MAX_OUTPUT_BYTES {
+    if output.len() + 1 > max_output {
         return Err(PolicyError::Evaluation);
     }
     let mut stdout = io::stdout().lock();
@@ -230,6 +237,13 @@ pub fn preview() -> Result<(), PolicyError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn host_limits_are_checked_before_reading_stdin() {
+        for (input, output) in [(0, 1), (1, 0), (131_073, 1), (1, 131_073)] {
+            assert!(matches!(preview_bounded(input, output), Err(PolicyError::InvalidInput)));
+        }
+    }
 
     #[test]
     fn supervisor_response_requires_exact_unambiguous_identity_and_shape() -> Result<(), Box<dyn std::error::Error>> {

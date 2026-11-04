@@ -28,6 +28,8 @@ mod process_sandbox;
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod registered_sandbox;
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+mod stdio;
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod supervisor;
 
 const MAX_REQUEST_BYTES: u64 = (MAX_DOCUMENT_BYTES as u64) * 2;
@@ -115,11 +117,20 @@ fn s14_consent_preview() -> Result<(), PolicyError> {
     stdout.write_all(b"\n").map_err(|_| PolicyError::Evaluation)
 }
 
+fn s14_identity() -> Result<(), PolicyError> {
+    let identity = json!({
+        "ruleProfile": cityos_zen_runtime::s14_decision::PROFILE,
+        "sandboxProfile": "cityos.zen.s14.sandbox-resources.v1",
+        "selectorSha256": cityos_zen_runtime::s14_decision::selector_document_sha256()?,
+    });
+    serde_json::to_writer(io::stdout().lock(), &identity).map_err(|_| PolicyError::Evaluation)
+}
+
 fn main() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1);
     let mode = arguments.next();
     let bounded_s14 = matches!(mode.as_deref().and_then(std::ffi::OsStr::to_str),
-        Some("--supervised-s14-consent-preview-stdio" | "--supervised-s14-rule-preview-stdio" | "--restricted-s14-rule-preview-stdio" | "--sandboxed-s14-rule-stdio"));
+        Some("--supervised-s14-consent-preview-stdio" | "--supervised-s14-rule-preview-stdio" | "--restricted-s14-rule-preview-stdio" | "--sandboxed-s14-rule-stdio" | "--s14-host-bootstrap-stdio" | "--s14-host-launcher-stdio"));
     if arguments.next().is_some() {
         if !bounded_s14 {
             eprintln!("cityos-zen-worker: authoritative isolation profile unavailable");
@@ -134,6 +145,8 @@ fn main() -> ExitCode {
             Some("--supervised-s14-consent-preview-stdio") => supervisor::s14_consent_preview(),
             Some("--supervised-s14-rule-preview-stdio") => supervisor::s14_rule_preview(),
             Some("--restricted-s14-rule-preview-stdio") => supervisor::restricted_s14_rule_preview(),
+            Some("--s14-host-bootstrap-stdio") => cityos_zen_worker::host_bootstrap(),
+            Some("--s14-host-launcher-stdio") => cityos_zen_worker::host_launcher_stdio(),
             _ => Err(PolicyError::Evaluation),
         }.is_ok() {
             ExitCode::SUCCESS
@@ -144,6 +157,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let result = match mode.as_deref().and_then(std::ffi::OsStr::to_str) {
+        Some("--s14-worker-identity-stdio") => s14_identity(),
         Some("--preview-stdio") => preview(),
         Some("--s14-consent-preview-stdio") => s14_consent_preview(),
         Some("--s14-rule-preview-stdio") => s14_rule_preview::preview(),

@@ -22,7 +22,8 @@ pub(crate) enum LimitError {
 
 /// Explicit finite limits expected on one cgroup subtree. These values must
 /// come from a separately authorized profile, not from the evaluated workload.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AggregateLimits {
     cpu_quota_usec: u64,
     cpu_period_usec: u64,
@@ -32,6 +33,10 @@ pub(crate) struct AggregateLimits {
 }
 
 impl AggregateLimits {
+    pub(crate) fn is_single_task(&self) -> bool { self.tasks == 1 }
+    pub(crate) fn revalidate(self) -> Result<Self, LimitError> {
+        Self::new(self.cpu_quota_usec, self.cpu_period_usec, self.memory_bytes, self.swap_bytes, self.tasks)
+    }
     pub(crate) fn new(
         cpu_quota_usec: u64,
         cpu_period_usec: u64,

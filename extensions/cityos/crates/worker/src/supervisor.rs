@@ -190,7 +190,7 @@ pub(crate) fn s14_consent_preview() -> Result<(), PolicyError> {
 pub(crate) fn s14_rule_preview() -> Result<(), PolicyError> {
     let started = Instant::now();
     // Do not let a network socket or a credential-bearing file become stdin.
-    require_anonymous_pipe(io::stdin().as_raw_fd(), nix::libc::O_RDONLY)?;
+    crate::stdio::require_anonymous_pipe(io::stdin().as_raw_fd(), nix::libc::O_RDONLY)?;
     supervised_preview_from("--restricted-s14-rule-preview-stdio", ResponseProfile::S14Rule, started)
 }
 
@@ -275,32 +275,13 @@ fn supervised_response_from(
 // Rule responses larger than PIPE_BUF require multiple writes and may be
 // partially delivered on timeout or disconnect. Their consumer must require
 // a successful supervisor exit and complete JSON/EOF before using any bytes.
-fn require_anonymous_pipe(fd: RawFd, access: i32) -> Result<(), PolicyError> {
-    let flags = fcntl(fd, FcntlArg::F_GETFL).map_err(|_| PolicyError::Evaluation)?;
-    if flags & nix::libc::O_ACCMODE != access
-        || flags & nix::libc::O_DIRECT != 0
-    {
-        return Err(PolicyError::Evaluation);
-    }
-    let path = format!("/proc/self/fd/{fd}");
-    let target = std::fs::read_link(&path).map_err(|_| PolicyError::Evaluation)?;
-    if !target.to_str().is_some_and(|name| name.starts_with("pipe:[") && name.ends_with(']')) {
-        return Err(PolicyError::Evaluation);
-    }
-    let original = std::fs::metadata(&path).map_err(|_| PolicyError::Evaluation)?;
-    if !original.file_type().is_fifo() {
-        return Err(PolicyError::Evaluation);
-    }
-    Ok(())
-}
-
 fn forward_pipe(fd: RawFd, bytes: &[u8], started: Instant, deadline: Duration) -> Result<(), ()> {
     forward_pipe_bounded(fd, bytes, started, deadline, 4096)
 }
 
 fn forward_pipe_bounded(fd: RawFd, bytes: &[u8], started: Instant, deadline: Duration, limit: usize) -> Result<(), ()> {
     if bytes.is_empty() || bytes.len() > limit || started.elapsed() >= deadline { return Err(()); }
-    require_anonymous_pipe(fd, nix::libc::O_WRONLY).map_err(|_| ())?;
+    crate::stdio::require_anonymous_pipe(fd, nix::libc::O_WRONLY).map_err(|_| ())?;
     let path = format!("/proc/self/fd/{fd}");
     let original = std::fs::metadata(&path).map_err(|_| ())?;
     let mut pipe = std::fs::OpenOptions::new()
@@ -394,15 +375,23 @@ pub(crate) fn restricted_s14_consent_preview() -> Result<(), PolicyError> {
 pub(crate) fn restricted_s14_rule_preview() -> Result<(), PolicyError> {
     // Child stdio must also be pipes when invoked directly; close all other
     // descriptors before creating the namespace or reading caller input.
-    require_anonymous_pipe(io::stdin().as_raw_fd(), nix::libc::O_RDONLY)?;
-    require_anonymous_pipe(io::stdout().as_raw_fd(), nix::libc::O_WRONLY)?;
+    crate::stdio::require_anonymous_pipe(io::stdin().as_raw_fd(), nix::libc::O_RDONLY)?;
+    crate::stdio::require_anonymous_pipe(io::stdout().as_raw_fd(), nix::libc::O_WRONLY)?;
     if std::env::vars_os().next().is_some() { return Err(PolicyError::Evaluation); }
     match nix::unistd::close(2) {
         Ok(()) | Err(Errno::EBADF) => {},
         Err(_) => return Err(PolicyError::Evaluation),
     }
     crate::inherited_fds::close_and_verify()?;
-    network_then_preview(crate::network::isolate, || restricted(crate::s14_rule_preview::preview))
+    network_then_preview(crate::network::isolate, || restricted(|| {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))]
+        {
+            crate::process_sandbox::install()?;
+            crate::s14_rule_preview::preview()
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+        { Err(PolicyError::Evaluation) }
+    }))
 }
 
 fn restricted(preview: impl FnOnce() -> Result<(), PolicyError>) -> Result<(), PolicyError> {
