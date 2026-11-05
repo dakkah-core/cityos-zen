@@ -41,7 +41,7 @@ impl TrustedLauncher {
 
     /// Run one complete request. A result is returned only after a successful
     /// child exit, EOF, cgroup kill/empty observation, direct-child reaping,
-    /// output validation, and the request's shared deadline.
+    /// output validation, a final limit readback, and the shared deadline.
     pub fn execute(mut self, request: &[u8]) -> Result<Vec<u8>, PolicyError> {
         let profile = self.resources.profile();
         if request.len() > profile.request_limit() { return Err(PolicyError::InvalidInput); }
@@ -133,10 +133,24 @@ impl TrustedLauncher {
             s14_rule_preview::validate_response(&bytes)?;
             Ok(bytes)
         })();
-        let cleaned = guard.cleanup();
-        if cleaned.is_err() || started.elapsed() >= deadline { return Err(PolicyError::Evaluation); }
-        result
+        finish(&mut guard, result, |guard| guard.resources.verify_limits(),
+            |guard| guard.cleanup(), started, deadline)
     }
+}
+
+// Clean up before the final readback so an error or timeout does not delay
+// termination. The snapshot cannot prove continuous control enforcement.
+fn finish<T>(guard: &mut T, result: Result<Vec<u8>, PolicyError>,
+    verify: impl FnOnce(&mut T) -> Result<(), ()>,
+    cleanup: impl FnOnce(&mut T) -> Result<(), PolicyError>,
+    started: Instant, deadline: Duration) -> Result<Vec<u8>, PolicyError> {
+    let cleaned = cleanup(guard);
+    if cleaned.is_err() { return Err(PolicyError::Evaluation); }
+    let limits = verify(guard);
+    if limits.is_err() || started.elapsed() >= deadline {
+        return Err(PolicyError::Evaluation);
+    }
+    result
 }
 
 fn write_deadline(socket: &UnixStream, bytes: &[u8], started: Instant, deadline: Duration) -> Result<(), PolicyError> {
@@ -232,6 +246,29 @@ impl Drop for Guard { fn drop(&mut self) { if !self.cleaned { let _ = self.clean
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_limit_failure_withholds_output_but_still_cleans_up() {
+        struct Fixture { limits_ok: bool, cleanup_ok: bool, steps: Vec<&'static str> }
+        for (limits_ok, cleanup_ok, expired, success) in [
+            (true, true, false, true), (false, true, false, false),
+            (true, false, false, false), (true, true, true, false),
+        ] {
+            let mut fixture = Fixture { limits_ok, cleanup_ok, steps: Vec::new() };
+            let deadline = if expired { Duration::ZERO } else { Duration::from_secs(10) };
+            let result = finish(&mut fixture, Ok(b"response".to_vec()), |state| {
+                state.steps.push("readback");
+                if state.limits_ok { Ok(()) } else { Err(()) }
+            }, |state| {
+                state.steps.push("cleanup");
+                if state.cleanup_ok { Ok(()) } else { Err(PolicyError::Evaluation) }
+            }, Instant::now(), deadline);
+            if cleanup_ok { assert_eq!(fixture.steps, ["cleanup", "readback"]); }
+            else { assert_eq!(fixture.steps, ["cleanup"]); }
+            assert_eq!(result.is_ok(), success);
+            if success { assert_eq!(result.ok().as_deref(), Some(&b"response"[..])); }
+        }
+    }
 
     #[test]
     fn broken_input_pipe_is_an_error_without_sigpipe_termination() -> Result<(), Box<dyn std::error::Error>> {

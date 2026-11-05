@@ -121,6 +121,12 @@ impl RegisteredCgroup {
         Ok(())
     }
 
+    /// Read the same host-selected aggregate limits after evaluation. These
+    /// sequential snapshots cannot prove continuous enforcement or custody.
+    pub(crate) fn verify_limits(&mut self) -> Result<(), ()> {
+        self.limits.verify(&self.profile.limits).map_err(|_| ())
+    }
+
     /// Explicitly request recursive cleanup on the registered subtree. A
     /// successful result is only an observed empty snapshot after cgroup.kill;
     /// child reaping and recovery if this process dies remain external duties.

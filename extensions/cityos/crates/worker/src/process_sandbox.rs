@@ -115,9 +115,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn filter_denies_credential_file_unix_socket_and_spawn_or_is_unavailable()
-        -> Result<(), Box<dyn std::error::Error>> {
+    fn run_filter_probe() -> Result<bool, Box<dyn std::error::Error>> {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let dir = std::env::temp_dir().join(format!("zen-sandbox-{}-{nonce}", std::process::id()));
         fs::create_dir(&dir)?;
@@ -138,7 +136,27 @@ mod tests {
         fs::remove_dir(&dir)?;
         assert!(output.status.success());
         let stdout = String::from_utf8(output.stdout)?;
-        assert!(stdout.contains("cityos-sandbox-enforced") || stdout.contains("cityos-sandbox-unavailable"));
+        let enforced = stdout.contains("cityos-sandbox-enforced");
+        let unavailable = stdout.contains("cityos-sandbox-unavailable");
+        if enforced == unavailable { return Err("sandbox probe did not report one outcome".into()); }
+        Ok(enforced)
+    }
+
+    #[test]
+    fn filter_denies_credential_file_unix_socket_and_spawn_or_is_unavailable()
+        -> Result<(), Box<dyn std::error::Error>> {
+        // Portable coverage: unsupported kernels may fail closed.
+        let _ = run_filter_probe()?;
+        Ok(())
+    }
+
+    // Opt-in Linux witness: this must run on the intended kernel and target.
+    // It exercises the installed filters in a subprocess, but does not cover
+    // cgroup custody, capability removal, the launcher, or the full evaluator.
+    #[test]
+    #[ignore = "requires a Linux target where Landlock and seccomp can be enforced"]
+    fn filter_enforcement_requires_kernel_support() -> Result<(), Box<dyn std::error::Error>> {
+        assert!(run_filter_probe()?, "Landlock or seccomp was unavailable");
         Ok(())
     }
 }
