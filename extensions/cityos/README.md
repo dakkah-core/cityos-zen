@@ -64,10 +64,13 @@ verification. Errors produce no result. The supervised mode validates the
 exact source identity and response and fails closed on worker failure or
 timeout; it does not establish a qualified isolation profile.
 
-Use the workspace toolchain projection and its own lockfile. Validate the
-projection against `rust/rust-toolchain.toml` in the owning CMS checkout before
-claiming toolchain parity. The upstream lockfile and each consumer lockfile
-represent separate dependency closures and require their own qualification.
+Use the workspace toolchain projection and its own lockfile. The canonical Rust
+workspace and toolchain source is `rust/rust-toolchain.toml` in the
+`cityos-shared-policy` product checkout. The CMS checkout remains the canonical
+owner of authority, secret and consumer registries until governed transfer; it
+does not own the Policy Rust workspace. The Zen upstream lockfile, CityOS
+extension lockfile, Policy lockfile and each consumer lockfile represent
+separate dependency closures and require their own qualification.
 
 From `extensions/cityos`:
 
@@ -75,16 +78,24 @@ From `extensions/cityos`:
 cargo +1.98.1 test --locked --workspace
 cargo +1.98.1 fmt --all -- --check
 python -m unittest discover -s ../../scripts/upstream -p 'test_*.py' -v
-python ../../scripts/upstream/check_toolchain.py --cms <path-to-cms-checkout>
 ```
 
-From the CMS checkout, after its Node selector and exact-version check:
+From the `cityos-shared-policy` product checkout, with `vendor/zen` initialized
+at the indexed submodule revision and clean:
+
+```powershell
+python scripts/zen/qualify.py build
+python scripts/zen/qualify.py qualify
+```
+
+For the CMS-owned source and consumer compatibility suites, run from the CMS
+checkout after its Node selector and exact-version check:
 
 ```powershell
 $env:CITYOS_CMS_ROOT = (Get-Location).Path
-node --test C:/cityos/cityos-zen/scripts/corpus/verify-s14.test.mjs C:/cityos/cityos-zen/scripts/corpus/verify-receipt-sources.test.mjs
-node node_modules/vitest/vitest.mjs run --config C:/cityos/cityos-zen/scripts/corpus/vitest-s14.config.mjs --root packages/shared-policy-application src/operation-receipt.test.ts src/operation-receipt-security.test.ts
-node node_modules/vitest/vitest.mjs run --config C:/cityos/dakkah-cityos-cms/packages/agora-demand-commitment-application/vitest.config.ts --root C:/cityos/cityos-zen scripts/corpus/verify-agora.test.ts
+node --test C:/cityos/cityos-shared-policy/vendor/zen/scripts/corpus/verify-s14.test.mjs C:/cityos/cityos-shared-policy/vendor/zen/scripts/corpus/verify-receipt-sources.test.mjs
+node node_modules/vitest/vitest.mjs run --config C:/cityos/cityos-shared-policy/vendor/zen/scripts/corpus/vitest-s14.config.mjs --root packages/shared-policy-application src/operation-receipt.test.ts src/operation-receipt-security.test.ts
+node node_modules/vitest/vitest.mjs run --config C:/cityos/dakkah-cityos-cms/packages/agora-demand-commitment-application/vitest.config.ts --root C:/cityos/cityos-shared-policy/vendor/zen scripts/corpus/verify-agora.test.ts
 ```
 
 The corpus runners check recorded CMS source blobs and use synthetic inputs.

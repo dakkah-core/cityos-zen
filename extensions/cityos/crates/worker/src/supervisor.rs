@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cityos_zen_contracts::{
-    PolicyError, S14ConsentPreviewResponse, PROFILE, S14_CONSENT_PREVIEW_KIND,
+    PolicyError, S14ConsentPreviewResponse, MAX_SAFE_INTEGER, PROFILE, S14_CONSENT_PREVIEW_KIND,
     S14_CONSENT_PREVIEW_PROFILE, S14_CONSENT_SOURCE_SHA256,
 };
 use nix::errno::Errno;
@@ -31,6 +31,20 @@ struct PreviewResponse {
     allowed: bool,
     source_sha256: String,
     profile: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AgoraQuantityResponse {
+    kind: String,
+    profile: String,
+    execution_profile: String,
+    source_sha256: String,
+    rule_id: String,
+    revision_digest: String,
+    matching_quantity: u64,
+    max_quantity: u64,
+    within_limit: bool,
 }
 
 // Observe without reaping: the child PID must stay reserved until after killpg,
@@ -194,6 +208,20 @@ pub(crate) fn s14_rule_preview() -> Result<(), PolicyError> {
     supervised_preview_from("--restricted-s14-rule-preview-stdio", ResponseProfile::S14Rule, started)
 }
 
+/// Run cart quantity computation through the killable, network-isolated worker.
+/// This returns only a calculation; it never issues or verifies authorization.
+pub(crate) fn agora_quantity() -> Result<(), PolicyError> {
+    let started = Instant::now();
+    crate::stdio::require_anonymous_pipe(io::stdin().as_raw_fd(), nix::libc::O_RDONLY)?;
+    let profile = cityos_zen_contracts::agora_quantity::EXECUTION_PROFILE;
+    if profile.network_enabled || profile.max_processes != 1
+        || profile.max_response_bytes as u64 > MAX_RESPONSE_BYTES
+    { return Err(PolicyError::Evaluation); }
+    let deadline = Duration::from_millis(profile.max_wall_clock_millis);
+    supervised_preview_with_deadline("--restricted-agora-quantity-stdio", ResponseProfile::AgoraQuantity,
+        started, deadline)
+}
+
 /// Experimental namespace setup, not a credential boundary or sandbox.
 pub(crate) fn experimental_network_preview() -> Result<(), PolicyError> {
     supervised_preview("--experimental-network-child-stdio", ResponseProfile::Cart)
@@ -204,6 +232,7 @@ enum ResponseProfile {
     Cart,
     S14Consent,
     S14Rule,
+    AgoraQuantity,
 }
 
 fn validate_response(bytes: &[u8], profile: ResponseProfile) -> Result<(), PolicyError> {
@@ -233,6 +262,24 @@ fn validate_response(bytes: &[u8], profile: ResponseProfile) -> Result<(), Polic
             }
         }
         ResponseProfile::S14Rule => crate::s14_rule_preview::validate_response(bytes)?,
+        ResponseProfile::AgoraQuantity => {
+            let response: AgoraQuantityResponse = serde_json::from_slice(bytes)
+                .map_err(|_| PolicyError::Evaluation)?;
+            let digest = |value: &str| value.len() == 64
+                && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            if response.kind != "agora-cart-quantity"
+                || response.profile != "cityos.zen.agora-cart-quantity.v1"
+                || response.execution_profile != cityos_zen_contracts::agora_quantity::EXECUTION_PROFILE.id
+                || !digest(&response.source_sha256)
+                || !response.revision_digest.strip_prefix("sha256:").is_some_and(digest)
+                || response.rule_id.is_empty()
+                || response.matching_quantity > MAX_SAFE_INTEGER
+                || response.max_quantity > MAX_SAFE_INTEGER
+                || response.within_limit != (response.matching_quantity <= response.max_quantity)
+            {
+                return Err(PolicyError::Evaluation);
+            }
+        }
     }
     Ok(())
 }
@@ -254,9 +301,11 @@ fn supervised_response_from(
 ) -> Result<Vec<u8>, PolicyError> {
     let limit = match profile {
         ResponseProfile::S14Rule => crate::s14_rule_preview::MAX_OUTPUT_BYTES as u64,
+        ResponseProfile::AgoraQuantity => cityos_zen_contracts::agora_quantity::EXECUTION_PROFILE.max_response_bytes as u64,
         _ => MAX_RESPONSE_BYTES,
     };
-    let bytes = supervise_from(command, started, deadline, limit, matches!(profile, ResponseProfile::S14Rule))
+    let bytes = supervise_from(command, started, deadline, limit,
+        matches!(profile, ResponseProfile::S14Consent | ResponseProfile::S14Rule | ResponseProfile::AgoraQuantity))
         .map_err(|_| PolicyError::Evaluation)?;
     validate_response(&bytes, profile)?;
     Ok(bytes)
@@ -335,6 +384,8 @@ fn supervised_forward_from(
     match profile {
         ResponseProfile::S14Rule => forward_pipe_bounded(output_fd, &bytes, started, deadline,
             crate::s14_rule_preview::MAX_OUTPUT_BYTES),
+        ResponseProfile::AgoraQuantity => forward_pipe_bounded(output_fd, &bytes, started, deadline,
+            cityos_zen_contracts::agora_quantity::EXECUTION_PROFILE.max_response_bytes),
         _ => forward_pipe(output_fd, &bytes, started, deadline),
     }.map_err(|_| PolicyError::Evaluation)
 }
@@ -344,6 +395,11 @@ fn supervised_preview(child_mode: &str, profile: ResponseProfile) -> Result<(), 
 }
 
 fn supervised_preview_from(child_mode: &str, profile: ResponseProfile, started: Instant) -> Result<(), PolicyError> {
+    supervised_preview_with_deadline(child_mode, profile, started, DEADLINE)
+}
+
+fn supervised_preview_with_deadline(child_mode: &str, profile: ResponseProfile, started: Instant,
+    deadline: Duration) -> Result<(), PolicyError> {
     let executable = std::env::current_exe().map_err(|_| PolicyError::Evaluation)?;
     let mut command = Command::new(executable);
     command
@@ -351,12 +407,12 @@ fn supervised_preview_from(child_mode: &str, profile: ResponseProfile, started: 
         .env_clear()
         .stdin(Stdio::inherit());
     match profile {
-        ResponseProfile::S14Consent | ResponseProfile::S14Rule => {
-            supervised_forward_from(&mut command, started, DEADLINE, profile, io::stdout().as_raw_fd())
+        ResponseProfile::S14Consent | ResponseProfile::S14Rule | ResponseProfile::AgoraQuantity => {
+            supervised_forward_from(&mut command, started, deadline, profile, io::stdout().as_raw_fd())
         }
         ResponseProfile::Cart => {
             // Preserve the legacy cart and experimental destination behavior.
-            let bytes = supervised_response_from(&mut command, started, DEADLINE, profile)?;
+            let bytes = supervised_response_from(&mut command, started, deadline, profile)?;
             io::stdout().lock().write_all(&bytes).map_err(|_| PolicyError::Evaluation)
         }
     }
@@ -369,7 +425,23 @@ pub(crate) fn restricted_preview() -> Result<(), PolicyError> {
 }
 
 pub(crate) fn restricted_s14_consent_preview() -> Result<(), PolicyError> {
-    restricted(crate::s14_consent_preview)
+    crate::stdio::require_anonymous_pipe(io::stdin().as_raw_fd(), nix::libc::O_RDONLY)?;
+    crate::stdio::require_anonymous_pipe(io::stdout().as_raw_fd(), nix::libc::O_WRONLY)?;
+    if std::env::vars_os().next().is_some() { return Err(PolicyError::Evaluation); }
+    match nix::unistd::close(2) {
+        Ok(()) | Err(Errno::EBADF) => {},
+        Err(_) => return Err(PolicyError::Evaluation),
+    }
+    crate::inherited_fds::close_and_verify()?;
+    network_then_preview(crate::network::isolate, || restricted(|| {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))]
+        {
+            crate::process_sandbox::install()?;
+            crate::s14_consent_preview()
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+        { Err(PolicyError::Evaluation) }
+    }))
 }
 
 pub(crate) fn restricted_s14_rule_preview() -> Result<(), PolicyError> {
@@ -394,13 +466,43 @@ pub(crate) fn restricted_s14_rule_preview() -> Result<(), PolicyError> {
     }))
 }
 
+/// The child has no inherited environment, credentials, network, or unrelated
+/// file descriptors. The parent owns deadline, process-group termination and
+/// reaping before a result can be released.
+pub(crate) fn restricted_agora_quantity() -> Result<(), PolicyError> {
+    crate::stdio::require_anonymous_pipe(io::stdin().as_raw_fd(), nix::libc::O_RDONLY)?;
+    crate::stdio::require_anonymous_pipe(io::stdout().as_raw_fd(), nix::libc::O_WRONLY)?;
+    if std::env::vars_os().next().is_some() { return Err(PolicyError::Evaluation); }
+    match nix::unistd::close(2) {
+        Ok(()) | Err(Errno::EBADF) => {},
+        Err(_) => return Err(PolicyError::Evaluation),
+    }
+    crate::inherited_fds::close_and_verify()?;
+    network_then_preview(crate::network::isolate, || restricted_with(crate::resource_limits::install_agora_quantity, || {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))]
+        {
+            crate::process_sandbox::install()?;
+            crate::agora_quantity::evaluate_stdio()
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+        { Err(PolicyError::Evaluation) }
+    }))
+}
+
 fn restricted(preview: impl FnOnce() -> Result<(), PolicyError>) -> Result<(), PolicyError> {
+    restricted_with(crate::resource_limits::install, preview)
+}
+
+fn restricted_with(
+    install_limits: impl FnOnce() -> Result<(), PolicyError>,
+    preview: impl FnOnce() -> Result<(), PolicyError>,
+) -> Result<(), PolicyError> {
     crate::inherited_fds::close_and_verify()?;
     require_no_new_privs(
         || set_no_new_privs().map_err(|_| ()),
         || get_no_new_privs().map_err(|_| ()),
     )?;
-    crate::resource_limits::install()?;
+    install_limits()?;
     preview()
 }
 

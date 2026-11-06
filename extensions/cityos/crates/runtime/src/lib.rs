@@ -9,6 +9,7 @@ use zen_engine::policy::{EvaluateRequest, PolicyWorkspace};
 pub mod s14_consent;
 pub mod s14_decision;
 pub mod v2_boolean;
+pub mod agora_quantity;
 
 pub fn evaluate_preview(
     policy: &AdmittedPreview,

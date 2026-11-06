@@ -9,6 +9,20 @@ const ADDRESS_SPACE_BYTES: rlim_t = 512 * 1024 * 1024;
 const CPU_SECONDS: rlim_t = 3;
 const OPEN_FILES: rlim_t = 32;
 
+pub(crate) fn install_agora_quantity() -> Result<(), PolicyError> {
+    let profile = cityos_zen_contracts::agora_quantity::EXECUTION_PROFILE;
+    if profile.id != "cityos.zen.agora-cart-quantity.execution.v1"
+        || profile.network_enabled || profile.max_processes != 1
+    {
+        return Err(PolicyError::Evaluation);
+    }
+    install_values(
+        rlim_t::try_from(profile.max_address_space_bytes).map_err(|_| PolicyError::Evaluation)?,
+        rlim_t::try_from(profile.max_cpu_seconds).map_err(|_| PolicyError::Evaluation)?,
+        rlim_t::try_from(profile.max_open_files).map_err(|_| PolicyError::Evaluation)?,
+    )
+}
+
 fn lower_and_verify(
     cap: rlim_t,
     mut get: impl FnMut() -> Result<(rlim_t, rlim_t), ()>,
@@ -26,10 +40,14 @@ fn lower_and_verify(
 }
 
 pub(crate) fn install() -> Result<(), PolicyError> {
+    install_values(ADDRESS_SPACE_BYTES, CPU_SECONDS, OPEN_FILES)
+}
+
+fn install_values(address_space: rlim_t, cpu_seconds: rlim_t, open_files: rlim_t) -> Result<(), PolicyError> {
     for (resource, cap) in [
-        (Resource::RLIMIT_AS, ADDRESS_SPACE_BYTES),
-        (Resource::RLIMIT_CPU, CPU_SECONDS),
-        (Resource::RLIMIT_NOFILE, OPEN_FILES),
+        (Resource::RLIMIT_AS, address_space),
+        (Resource::RLIMIT_CPU, cpu_seconds),
+        (Resource::RLIMIT_NOFILE, open_files),
         (Resource::RLIMIT_FSIZE, 0),
         (Resource::RLIMIT_CORE, 0),
     ] {

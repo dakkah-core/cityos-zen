@@ -1,0 +1,16 @@
+{
+  "types": [
+    {"typeRef":"bool","kind":"boolean"},
+    {"typeRef":"count","kind":"quantity","unitRef":"cityos:unit:item","minimum":0,"maximum":9007199254740991},
+    {"typeRef":"input","kind":"record","fields":[{"name":"quantity","typeRef":"count"},{"name":"limit","typeRef":"count"}]}
+  ],
+  "behavior": {
+    "schemaVersion":"cityos.behavior-definition.v2","behaviorId":"cityos.agora.quantity-comparison",
+    "version":"1.0.0","ownerRef":"core.agora","kind":"decision","implementation":"generated",
+    "requiredCapabilities":[],"inputTypeRef":"input","resultTypeRef":"bool","locals":[],
+    "expression":{"nodeId":"within-limit","typeRef":"bool","kind":"op","operator":"lte","args":[
+      {"nodeId":"quantity","typeRef":"count","kind":"ref","source":"input","path":["quantity"]},
+      {"nodeId":"limit","typeRef":"count","kind":"ref","source":"input","path":["limit"]}
+    ]}
+  }
+}

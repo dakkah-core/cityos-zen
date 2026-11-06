@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 mod s14_rule_preview;
+mod agora_quantity;
 
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod cgroup_cleanup;
@@ -164,7 +165,11 @@ fn main() -> ExitCode {
     let mut arguments = std::env::args_os().skip(1);
     let mode = arguments.next();
     let bounded_s14 = matches!(mode.as_deref().and_then(std::ffi::OsStr::to_str),
-        Some("--supervised-s14-consent-preview-stdio" | "--supervised-s14-rule-preview-stdio" | "--restricted-s14-rule-preview-stdio" | "--sandboxed-s14-rule-stdio" | "--s14-host-bootstrap-stdio" | "--s14-host-launcher-stdio"));
+        Some("--agora-quantity-stdio" | "--restricted-agora-quantity-stdio"
+            | "--supervised-s14-consent-preview-stdio" | "--restricted-s14-consent-preview-stdio"
+            | "--supervised-s14-rule-preview-stdio"
+            | "--restricted-s14-rule-preview-stdio" | "--sandboxed-s14-rule-stdio"
+            | "--s14-host-bootstrap-stdio" | "--s14-host-launcher-stdio"));
     if arguments.next().is_some() {
         if !bounded_s14 {
             eprintln!("cityos-zen-worker: authoritative isolation profile unavailable");
@@ -176,7 +181,10 @@ fn main() -> ExitCode {
     if bounded_s14 {
         #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
         return if match mode.as_deref().and_then(std::ffi::OsStr::to_str) {
+            Some("--agora-quantity-stdio") => supervisor::agora_quantity(),
+            Some("--restricted-agora-quantity-stdio") => supervisor::restricted_agora_quantity(),
             Some("--supervised-s14-consent-preview-stdio") => supervisor::s14_consent_preview(),
+            Some("--restricted-s14-consent-preview-stdio") => supervisor::restricted_s14_consent_preview(),
             Some("--supervised-s14-rule-preview-stdio") => supervisor::s14_rule_preview(),
             Some("--restricted-s14-rule-preview-stdio") => supervisor::restricted_s14_rule_preview(),
             Some("--s14-host-bootstrap-stdio") => cityos_zen_worker::host_bootstrap(),
@@ -201,7 +209,6 @@ fn main() -> ExitCode {
         #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
         Some("--restricted-preview-stdio") => supervisor::restricted_preview(),
         #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
-        Some("--restricted-s14-consent-preview-stdio") => supervisor::restricted_s14_consent_preview(),
         #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
         Some("--experimental-network-preview-stdio") => supervisor::experimental_network_preview(),
         #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]

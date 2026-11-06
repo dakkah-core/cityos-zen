@@ -1,6 +1,8 @@
 //! Source-local preview contracts. These types do not grant policy authority.
 use serde::{Deserialize, Serialize};
 
+pub mod agora_quantity;
+
 pub const PROFILE: &str = "cityos.zen.cart-quantity-preview.v1";
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub const MAX_DOCUMENT_BYTES: usize = 65_536;
