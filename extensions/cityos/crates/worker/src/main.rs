@@ -42,6 +42,40 @@ struct PreviewRequest {
     facts: PreviewFacts,
 }
 
+/// The source and input remain strings until each loss-aware decoder runs.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct V2IntegerPreviewRequest {
+    kind: String,
+    profile: String,
+    source: String,
+    input: String,
+}
+
+fn v2_integer_preview() -> Result<(), PolicyError> {
+    let mut bytes = Vec::new();
+    io::stdin().lock().take(MAX_REQUEST_BYTES + 1).read_to_end(&mut bytes)
+        .map_err(|_| PolicyError::InvalidInput)?;
+    if bytes.len() as u64 > MAX_REQUEST_BYTES
+        || bytes.iter().copied().find(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n')) != Some(b'{') {
+        return Err(PolicyError::InvalidInput);
+    }
+    let request: V2IntegerPreviewRequest = serde_json::from_slice(&bytes)
+        .map_err(|_| PolicyError::InvalidInput)?;
+    if request.kind != "v2-integer-preview"
+        || request.profile != cityos_zen_admission::v2_boolean::INTEGER_PREVIEW_PROFILE
+        || request.source.len() > MAX_DOCUMENT_BYTES || request.input.len() > MAX_DOCUMENT_BYTES {
+        return Err(PolicyError::InvalidInput);
+    }
+    let policy = cityos_zen_admission::v2_boolean::admit_integer_preview(request.source.as_bytes())?;
+    let result = cityos_zen_runtime::v2_boolean::evaluate(&policy, request.input.as_bytes())?;
+    let response = json!({"kind":"v2-integer-preview", "profile":policy.profile(),
+        "sourceSha256":policy.source_sha256(), "result":result});
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &response).map_err(|_| PolicyError::Evaluation)?;
+    stdout.write_all(b"\n").map_err(|_| PolicyError::Evaluation)
+}
+
 fn preview() -> Result<(), PolicyError> {
     let mut bytes = Vec::new();
     io::stdin()
@@ -159,6 +193,7 @@ fn main() -> ExitCode {
     let result = match mode.as_deref().and_then(std::ffi::OsStr::to_str) {
         Some("--s14-worker-identity-stdio") => s14_identity(),
         Some("--preview-stdio") => preview(),
+        Some("--v2-integer-preview-stdio") => v2_integer_preview(),
         Some("--s14-consent-preview-stdio") => s14_consent_preview(),
         Some("--s14-rule-preview-stdio") => s14_rule_preview::preview(),
         #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]

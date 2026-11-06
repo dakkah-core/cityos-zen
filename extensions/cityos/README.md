@@ -13,6 +13,17 @@ sandbox or a credential boundary. Do not route an owner action through any
 preview. Fact provenance, receipt issuance and owner enforcement are outside
 these previews.
 
+The separate `cityos.zen.v2-safe-integer-comparison-preview.v1` admission
+profile accepts flat V2 Boolean, enum, bounded integer and unit-identified
+quantity inputs and Boolean comparisons. Integer tokens and declared ranges are limited to the JavaScript
+safe-integer domain; arithmetic, coercion and general decimal operations are
+not admitted. The original Boolean/enum preview remains a separate profile.
+`--v2-integer-preview-stdio` accepts a JSON object containing `kind`, `profile`,
+`source` and `input`; `source` and `input` are JSON strings so their original
+bytes can be checked before decoding. This mode performs a calculation over
+caller-supplied facts. It has no deadline or operating-system isolation and
+must not be used as an authoritative evaluation or a receipt.
+
 The supervised cart and experimental network preview retain their existing
 stdout behavior, including terminal and regular-file destinations; their final
 stdout write and error messages can block. The supervised S14 mode instead

@@ -7,6 +7,7 @@ fn unqualified_worker_returns_no_authorization() -> Result<(), Box<dyn std::erro
         vec!["--authoritative-stdio"],
         vec!["--sandboxed-s14-rule-stdio"],
         vec!["--preview-stdio", "--authoritative-stdio"],
+        vec!["--v2-integer-preview-stdio", "--authoritative-stdio"],
         vec!["--supervised-preview-stdio", "--authoritative-stdio"],
         vec!["--supervised-s14-rule-preview-stdio", "--authoritative-stdio"],
         vec!["--restricted-s14-rule-preview-stdio", "--authoritative-stdio"],

@@ -1,4 +1,4 @@
-//! Restricted V2 Boolean/enum lowering for source-local previews only.
+//! Restricted V2 Boolean/enum and exact integer/quantity previews only.
 //!
 //! The input is an extracted `{types, behavior}` pair, not a CityOS policy
 //! publication. No policy selection, provenance, or authorization is implied.
@@ -26,6 +26,8 @@ use super::{json_nesting_within_limit, Unique};
 const ENTRY: &str = "v2-boolean";
 const GOAL: &str = "facts.result";
 const WRITER: &str = "v2-result";
+pub const BOOLEAN_PREVIEW_PROFILE: &str = "cityos.zen.v2-boolean-preview.v1";
+pub const INTEGER_PREVIEW_PROFILE: &str = "cityos.zen.v2-safe-integer-comparison-preview.v1";
 
 // Parentheses are deliberately emitted by the lowering to preserve grouping.
 // Accept only Zen's corresponding hint on our generated expression; every
@@ -116,6 +118,17 @@ enum Type {
         type_ref: String,
         values: Vec<String>,
     },
+    Integer {
+        type_ref: String,
+        minimum: i64,
+        maximum: i64,
+    },
+    Quantity {
+        type_ref: String,
+        unit_ref: String,
+        minimum: i64,
+        maximum: i64,
+    },
     Record {
         type_ref: String,
         fields: Vec<Field>,
@@ -127,6 +140,8 @@ impl Type {
         match self {
             Self::Boolean { type_ref }
             | Self::Enum { type_ref, .. }
+            | Self::Integer { type_ref, .. }
+            | Self::Quantity { type_ref, .. }
             | Self::Record { type_ref, .. } => type_ref,
         }
     }
@@ -231,10 +246,16 @@ pub struct AdmittedV2Boolean {
     fields: Vec<Field>,
     types: BTreeMap<String, Type>,
     source_sha256: String,
+    profile: &'static str,
 }
 impl AdmittedV2Boolean {
     pub fn source_sha256(&self) -> &str {
         &self.source_sha256
+    }
+
+    /// Identifies the admission semantics, not qualification or authority.
+    pub fn profile(&self) -> &'static str {
+        self.profile
     }
 
     /// Validate the entire closed V2 input before encoding finite enum values.
@@ -287,6 +308,9 @@ fn encode_scalar(ty: &Type, value: &Value) -> Option<Value> {
         Type::Enum { values, .. } => values
             .iter()
             .position(|v| Some(v.as_str()) == value.as_str())
+            .map(|n| json!(n)),
+        Type::Integer { minimum, maximum, .. } | Type::Quantity { minimum, maximum, .. } => value.as_i64()
+            .filter(|n| (*minimum..=*maximum).contains(n))
             .map(|n| json!(n)),
         Type::Record { .. } => None,
     }
@@ -364,6 +388,15 @@ impl Lower<'_> {
                         if operator == "eq" { "==" } else { "!=" },
                         children[1].1
                     ),
+                    "lt" | "lte" | "gt" | "gte"
+                        if children[0].0 == children[1].0
+                            && matches!(self.types.get(&children[0].0), Some(Type::Integer { .. } | Type::Quantity { .. })) => {
+                        let op = match operator.as_str() {
+                            "lt" => "<", "lte" => "<=", "gt" => ">", "gte" => ">=",
+                            _ => return Err(PolicyError::Unsupported),
+                        };
+                        format!("({} {} {})", children[0].1, op, children[1].1)
+                    }
                     _ => return Err(PolicyError::Unsupported),
                 }
             }
@@ -402,6 +435,16 @@ impl DecisionLoader for Loader {
 
 /// Admit only flat Boolean/finite-enum V2 expressions; all other V2 features fail.
 pub fn admit(source: &[u8]) -> Result<AdmittedV2Boolean, PolicyError> {
+    admit_profile(source, false)
+}
+
+/// Admit finite safe-integer and unit-identified quantity comparisons. This is
+/// a distinct preview profile; it does not admit arithmetic or coercion.
+pub fn admit_integer_preview(source: &[u8]) -> Result<AdmittedV2Boolean, PolicyError> {
+    admit_profile(source, true)
+}
+
+fn admit_profile(source: &[u8], integer_profile: bool) -> Result<AdmittedV2Boolean, PolicyError> {
     let value = decode(source)?;
     // Serde struct visitors can accept positional sequences. V2 requires
     // objects, including nested record fields, at every struct boundary.
@@ -434,6 +477,13 @@ pub fn admit(source: &[u8]) -> Result<AdmittedV2Boolean, PolicyError> {
             return Err(PolicyError::Unsupported);
         }
         match &ty {
+            Type::Integer { minimum, maximum, .. } | Type::Quantity { minimum, maximum, .. } => {
+                const SAFE: i64 = 9_007_199_254_740_991;
+                if !integer_profile || *minimum < -SAFE || *maximum > SAFE || minimum > maximum
+                    || matches!(&ty, Type::Quantity { unit_ref, .. } if !valid_ref(unit_ref)) {
+                    return Err(PolicyError::Unsupported);
+                }
+            }
             Type::Enum { values, .. } => {
                 let unique: BTreeSet<_> = values.iter().collect();
                 if values.is_empty()
@@ -484,7 +534,7 @@ pub fn admit(source: &[u8]) -> Result<AdmittedV2Boolean, PolicyError> {
             if fields.iter().any(|f| {
                 !matches!(
                     types.get(&f.type_ref),
-                    Some(Type::Boolean { .. } | Type::Enum { .. })
+                    Some(Type::Boolean { .. } | Type::Enum { .. } | Type::Integer { .. } | Type::Quantity { .. })
                 )
             }) {
                 return Err(PolicyError::Unsupported);
@@ -566,5 +616,6 @@ pub fn admit(source: &[u8]) -> Result<AdmittedV2Boolean, PolicyError> {
         fields,
         types,
         source_sha256: format!("{:x}", Sha256::digest(source)),
+        profile: if integer_profile { INTEGER_PREVIEW_PROFILE } else { BOOLEAN_PREVIEW_PROFILE },
     })
 }
