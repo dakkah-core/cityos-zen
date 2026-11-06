@@ -15,6 +15,9 @@ const REAP_GRACE: Duration = Duration::from_millis(100);
 /// cgroup and artifact out of band and keep an external recovery owner alive.
 /// No other code may reap this launcher's child: PID reservation is required
 /// until after cgroup placement and process-group cleanup.
+/// Run this launcher in a separately supervised process. The external owner
+/// must enforce its own deadline, kill and reap the launcher if it stalls,
+/// and recover the cgroup. Kernel stalls can delay even termination and reaping.
 pub struct TrustedLauncher { resources: RegisteredCgroup, artifact: VerifiedArtifact }
 
 impl TrustedLauncher {
@@ -42,6 +45,8 @@ impl TrustedLauncher {
     /// Run one complete request. A result is returned only after a successful
     /// child exit, EOF, cgroup kill/empty observation, direct-child reaping,
     /// output validation, a final limit readback, and the shared deadline.
+    /// Cleanup joins the input writer even after failure; a stalled thread can
+    /// prevent this method from returning until the external supervisor acts.
     pub fn execute(mut self, request: &[u8]) -> Result<Vec<u8>, PolicyError> {
         let profile = self.resources.profile();
         if request.len() > profile.request_limit() { return Err(PolicyError::InvalidInput); }
@@ -199,12 +204,28 @@ fn observe(id: u32) -> Result<WaitStatus, PolicyError> {
 
 struct Guard { child: Option<Child>, resources: RegisteredCgroup, cleaned: bool,
     cancelled: Arc<AtomicBool>, writer: Option<thread::JoinHandle<()>> }
+
+// Cancel first, attempt workload cleanup, then join even if cleanup failed.
+// The join can stall in the kernel; only the external process supervisor can
+// enforce the launcher deadline and recover the cgroup in that case.
+fn cleanup_with_writer(cancelled: &AtomicBool, writer: Option<thread::JoinHandle<()>>,
+    stop: impl FnOnce() -> Result<(), PolicyError>) -> Result<(), PolicyError> {
+    cancelled.store(true, Ordering::Release);
+    let stopped = stop();
+    let writer_ok = writer.is_none_or(|writer| writer.join().is_ok());
+    if stopped.is_ok() && writer_ok { Ok(()) } else { Err(PolicyError::Evaluation) }
+}
+
 impl Guard {
     fn cleanup(&mut self) -> Result<(), PolicyError> {
         if self.cleaned { return Err(PolicyError::Evaluation); }
         self.cleaned = true;
-        self.cancelled.store(true, Ordering::Release);
-        let writer_ok = self.writer.take().is_none_or(|writer| writer.join().is_ok());
+        let cancelled = Arc::clone(&self.cancelled);
+        let writer = self.writer.take();
+        cleanup_with_writer(&cancelled, writer, || self.stop_child())
+    }
+
+    fn stop_child(&mut self) -> Result<(), PolicyError> {
         let Some(mut child) = self.child.take() else { return Err(PolicyError::Evaluation) };
         // Keep the PID reserved until after group signalling, preventing reuse.
         let status = observe(child.id());
@@ -228,7 +249,7 @@ impl Guard {
         let start = Instant::now();
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return if writer_ok && group_ok && direct_ok && cgroup_ok { Ok(()) } else { Err(PolicyError::Evaluation) },
+                Ok(Some(_)) => return if group_ok && direct_ok && cgroup_ok { Ok(()) } else { Err(PolicyError::Evaluation) },
                 Ok(None) if start.elapsed() < REAP_GRACE => thread::sleep(INTERVAL),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted && start.elapsed() < REAP_GRACE => {},
                 _ => {
@@ -246,6 +267,63 @@ impl Drop for Guard { fn drop(&mut self) { if !self.cleaned { let _ = self.clean
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_stops_workload_before_joining_stalled_writer() -> Result<(), Box<dyn std::error::Error>> {
+        for stop_ok in [true, false] {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let (release_tx, release_rx) = mpsc::channel();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let writer = thread::spawn(move || {
+                let _ = ready_tx.send(());
+                let _ = release_rx.recv();
+            });
+            ready_rx.recv_timeout(Duration::from_secs(1))?;
+            let (stopped_tx, stopped_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let cleanup_cancelled = Arc::clone(&cancelled);
+            let cleanup = thread::spawn(move || {
+                let result = cleanup_with_writer(&cleanup_cancelled, Some(writer), || {
+                    let _ = stopped_tx.send(cleanup_cancelled.load(Ordering::Acquire));
+                    if stop_ok { Ok(()) } else { Err(PolicyError::Evaluation) }
+                });
+                let _ = done_tx.send(result);
+            });
+            let cancelled_before_stop = stopped_rx.recv_timeout(Duration::from_secs(1))?;
+            let early = done_rx.recv_timeout(Duration::from_millis(200));
+            release_tx.send(())?;
+            let (returned_early, result) = match early {
+                Ok(result) => (true, result),
+                Err(mpsc::RecvTimeoutError::Timeout) => (false, done_rx.recv_timeout(Duration::from_secs(1))?),
+                Err(error) => return Err(error.into()),
+            };
+            cleanup.join().map_err(|_| "cleanup panicked")?;
+            assert!(cancelled_before_stop);
+            assert!(!returned_early, "cleanup returned before the writer exited");
+            assert_eq!(result.is_ok(), stop_ok);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_requires_both_stopped_workload_and_successful_writer() {
+        for (stop_ok, writer_panics, success) in [
+            (true, false, true), (false, false, false), (true, true, false),
+        ] {
+            let cancelled = AtomicBool::new(false);
+            let writer = thread::spawn(move || { if writer_panics { panic!("writer failed"); } });
+            let started = Instant::now();
+            while !writer.is_finished() && started.elapsed() < Duration::from_secs(1) {
+                thread::yield_now();
+            }
+            assert!(writer.is_finished(), "writer did not finish");
+            let result = cleanup_with_writer(&cancelled, Some(writer), || {
+                if stop_ok { Ok(()) } else { Err(PolicyError::Evaluation) }
+            });
+            assert_eq!(result.is_ok(), success);
+            assert!(cancelled.load(Ordering::Acquire));
+        }
+    }
 
     #[test]
     fn final_limit_failure_withholds_output_but_still_cleans_up() {

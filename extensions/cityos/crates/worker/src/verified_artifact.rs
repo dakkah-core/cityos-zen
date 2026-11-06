@@ -1,5 +1,5 @@
 //! Immutable executable identity for the host-selected sandbox bootstrap.
-use std::{fs::File, io::{Read, Seek, SeekFrom}, os::fd::{AsRawFd, OwnedFd}, os::unix::fs::FileTypeExt};
+use std::{fs::File, io::{Read, Seek, SeekFrom}, os::fd::{AsRawFd, OwnedFd}, os::unix::fs::{FileExt, FileTypeExt}};
 use cityos_zen_contracts::PolicyError;
 use nix::fcntl::{fcntl, FcntlArg, SealFlag};
 use sha2::{Digest, Sha256};
@@ -15,10 +15,9 @@ fn integer(bytes: &[u8]) -> Option<u64> {
     Some(out)
 }
 
-fn static_elf(file: &mut File, size: u64) -> Result<(), PolicyError> {
+fn static_elf(file: &File, size: u64) -> Result<(), PolicyError> {
     let mut header = [0u8; 64];
-    file.seek(SeekFrom::Start(0)).map_err(|_| PolicyError::Evaluation)?;
-    file.read_exact(&mut header).map_err(|_| PolicyError::Evaluation)?;
+    file.read_exact_at(&mut header, 0).map_err(|_| PolicyError::Evaluation)?;
     if &header[..4] != b"\x7fELF" || header[4] != 2 || header[5] != 1 || header[6] != 1 {
         return Err(PolicyError::Evaluation);
     }
@@ -40,9 +39,8 @@ fn static_elf(file: &mut File, size: u64) -> Result<(), PolicyError> {
     { return Err(PolicyError::Evaluation); }
     let mut loadable = false;
     for index in 0..count {
-        file.seek(SeekFrom::Start(offset + entry * index)).map_err(|_| PolicyError::Evaluation)?;
         let mut kind = [0; 4];
-        file.read_exact(&mut kind).map_err(|_| PolicyError::Evaluation)?;
+        file.read_exact_at(&mut kind, offset + entry * index).map_err(|_| PolicyError::Evaluation)?;
         match u32::from_le_bytes(kind) {
             1 => loadable = true, // PT_LOAD
             3 => return Err(PolicyError::Evaluation), // PT_INTERP
@@ -91,15 +89,17 @@ impl VerifiedArtifact {
         let seals = SealFlag::from_bits_retain(fcntl(file.as_raw_fd(), FcntlArg::F_GET_SEALS).map_err(|_| PolicyError::Evaluation)?);
         let required = SealFlag::F_SEAL_SEAL | SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW | SealFlag::F_SEAL_WRITE;
         if !seals.contains(required) { return Err(PolicyError::Evaluation); }
-        let mut reader = file.try_clone().map_err(|_| PolicyError::Evaluation)?;
-        static_elf(&mut reader, meta.len())?;
-        reader.seek(SeekFrom::Start(0)).map_err(|_| PolicyError::Evaluation)?;
+        // A cloned descriptor shares its seek offset with other holders. Use
+        // positional reads so they cannot redirect ELF checks or digest input.
+        static_elf(&file, meta.len())?;
         let mut digest = Sha256::new();
         let mut buffer = [0u8; 32 * 1024];
-        loop {
-            let n = reader.read(&mut buffer).map_err(|_| PolicyError::Evaluation)?;
-            if n == 0 { break; }
+        let mut offset = 0u64;
+        while offset < meta.len() {
+            let n = (meta.len() - offset).min(buffer.len() as u64) as usize;
+            file.read_exact_at(&mut buffer[..n], offset).map_err(|_| PolicyError::Evaluation)?;
             digest.update(&buffer[..n]);
+            offset += n as u64;
         }
         if format!("{:x}", digest.finalize()) != expected { return Err(PolicyError::Evaluation); }
         Ok(Self { file })
@@ -147,6 +147,25 @@ mod tests {
         file.write_all(&bytes)?;
         let digest = format!("{:x}", Sha256::digest(&bytes));
         assert!(VerifiedArtifact::capture(file.into(), &digest).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn sealed_identity_checks_do_not_change_shared_seek_offset() -> Result<(), Box<dyn std::error::Error>> {
+        let mut bytes = elf(false);
+        bytes.resize(32 * 1024 + 137, 0x5a);
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let fd = sealed(&bytes)?;
+        let mut alias = File::from(fd.try_clone()?);
+        alias.seek(SeekFrom::Start(17))?;
+        assert!(VerifiedArtifact::capture(fd, &digest).is_ok());
+        assert_eq!(alias.stream_position()?, 17);
+
+        // A digest of just a prefix or suffix must never identify the whole ELF.
+        let prefix_digest = format!("{:x}", Sha256::digest(&bytes[..32 * 1024]));
+        let suffix_digest = format!("{:x}", Sha256::digest(&bytes[32 * 1024..]));
+        assert!(VerifiedArtifact::capture(sealed(&bytes)?, &prefix_digest).is_err());
+        assert!(VerifiedArtifact::capture(sealed(&bytes)?, &suffix_digest).is_err());
         Ok(())
     }
 

@@ -1,7 +1,8 @@
 //! One request from the trusted S14 host. Control values are not policy facts.
-use std::{fs::OpenOptions, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt},
+use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path}, time::Duration};
 use cityos_zen_contracts::PolicyError;
+use rustix::fs::{self, Mode, OFlags, ResolveFlags};
 use serde::Deserialize;
 use crate::{RegisteredProfile, RegisteredResources, TrustedLauncher};
 
@@ -43,6 +44,24 @@ fn path(value: &str) -> Result<&Path, PolicyError> {
     Ok(path)
 }
 
+// Resolve from an opened root in one kernel operation. O_NOFOLLOW alone only
+// protects the final component; an intermediate symlink could redirect either
+// registration. Do not fall back when openat2 or its resolution flags fail.
+// The host still owns mount-namespace integrity and resource custody.
+fn open_registered(value: &str, directory: bool) -> Result<File, PolicyError> {
+    let relative = path(value)?.strip_prefix("/").map_err(|_| PolicyError::InvalidInput)?;
+    if relative.as_os_str().is_empty() { return Err(PolicyError::InvalidInput); }
+    let root = OpenOptions::new().read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open("/").map_err(|_| PolicyError::Evaluation)?;
+    let mut flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    if directory { flags |= OFlags::DIRECTORY; }
+    let fd = fs::openat2(&root, relative, flags, Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS)
+        .map_err(|_| PolicyError::Evaluation)?;
+    Ok(File::from(fd))
+}
+
 fn read_frame(input: &mut impl Read, limit: usize) -> Result<Vec<u8>, PolicyError> {
     let mut length = [0; 4];
     input.read_exact(&mut length).map_err(|_| PolicyError::InvalidInput)?;
@@ -66,16 +85,12 @@ pub(crate) fn run() -> Result<(), PolicyError> {
     let mut trailing = [0; 1];
     if input.read(&mut trailing).map_err(|_| PolicyError::InvalidInput)? != 0 { return Err(PolicyError::InvalidInput); }
     drop(input);
-    let directory = OpenOptions::new().read(true)
-        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-        .open(path(&control.cgroup_path)?).map_err(|_| PolicyError::Evaluation)?;
+    let directory = open_registered(&control.cgroup_path, true)?;
     let identity = directory.metadata().map_err(|_| PolicyError::Evaluation)?;
     if identity.dev() != control.cgroup_device || identity.ino() != control.cgroup_inode {
         return Err(PolicyError::Evaluation);
     }
-    let artifact = OpenOptions::new().read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC | nix::libc::O_NONBLOCK)
-        .open(path(&control.artifact_path)?).map_err(|_| PolicyError::Evaluation)?;
+    let artifact = open_registered(&control.artifact_path, false)?;
     let resources = RegisteredResources::capture(directory.into(), profile)?;
     let response = TrustedLauncher::capture_file(resources, artifact, &control.artifact_sha256, &control.selector_sha256)?
         .execute(&request)?;
@@ -85,6 +100,7 @@ pub(crate) fn run() -> Result<(), PolicyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{os::unix::fs::symlink, time::{SystemTime, UNIX_EPOCH}};
 
     #[test]
     fn host_frames_require_a_complete_nonempty_bounded_payload() {
@@ -100,5 +116,40 @@ mod tests {
         assert!(path("../worker").is_err());
         assert!(path("/run/../worker").is_err());
         assert!(path("").is_err());
+    }
+
+    #[test]
+    fn registered_paths_reject_symlinks_in_every_component() -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let base = std::fs::canonicalize(std::env::temp_dir())?
+            .join(format!("cityos-registered-path-{}-{nonce}", std::process::id()));
+        let real = base.join("real");
+        std::fs::create_dir_all(&real)?;
+        std::fs::create_dir(real.join("cgroup"))?;
+        std::fs::write(real.join("artifact"), b"fixture")?;
+        symlink(&real, base.join("alias"))?;
+        symlink(real.join("artifact"), base.join("artifact-link"))?;
+        let to_str = |path: &Path| -> Result<String, Box<dyn std::error::Error>> {
+            Ok(path.to_str().ok_or("non-UTF-8 test path")?.to_owned())
+        };
+
+        // Establish openat2 support first, so unsupported kernels cannot make
+        // the rejection checks pass without exercising successful resolution.
+        assert!(open_registered(&to_str(&real)?, true).is_ok());
+        assert!(open_registered(&to_str(&real.join("artifact"))?, false).is_ok());
+        assert!(open_registered(&to_str(&real.join("cgroup"))?, true).is_ok());
+        assert!(open_registered(&to_str(&base.join("alias"))?, true).is_err());
+        assert!(open_registered(&to_str(&base.join("alias/cgroup"))?, true).is_err());
+        assert!(open_registered(&to_str(&base.join("alias/artifact"))?, false).is_err());
+        assert!(open_registered(&to_str(&base.join("artifact-link"))?, false).is_err());
+        assert!(open_registered("/", true).is_err());
+
+        std::fs::remove_file(base.join("artifact-link"))?;
+        std::fs::remove_file(base.join("alias"))?;
+        std::fs::remove_file(real.join("artifact"))?;
+        std::fs::remove_dir(real.join("cgroup"))?;
+        std::fs::remove_dir(real)?;
+        std::fs::remove_dir(base)?;
+        Ok(())
     }
 }
