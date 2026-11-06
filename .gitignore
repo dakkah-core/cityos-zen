@@ -11,3 +11,6 @@ index.node
 
 .npmrc
 yarn-error.log
+
+# Python cache from upstream integration tooling.
+/scripts/upstream/__pycache__/
