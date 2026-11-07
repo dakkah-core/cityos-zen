@@ -1,0 +1,44 @@
+{
+  "types": [
+    {"typeRef":"bool","kind":"boolean"},
+    {"typeRef":"facts","kind":"record","fields":[
+      {"name":"realmControllerCommand","typeRef":"bool"},
+      {"name":"aiSubject","typeRef":"bool"},
+      {"name":"aiWorkload","typeRef":"bool"},
+      {"name":"finalApproved","typeRef":"bool"},
+      {"name":"selfApproval","typeRef":"bool"},
+      {"name":"requiresTwoApprovers","typeRef":"bool"},
+      {"name":"hasTwoDistinctApprovers","typeRef":"bool"}
+    ]}
+  ],
+  "behavior": {
+    "schemaVersion":"cityos.behavior-definition.v2",
+    "behaviorId":"fixture:tryton-sod-source-semantics",
+    "version":"1.0.0",
+    "ownerRef":"fixture:tryton-sod-source-snapshot",
+    "kind":"decision",
+    "implementation":"generated",
+    "requiredCapabilities":[],
+    "inputTypeRef":"facts",
+    "resultTypeRef":"bool",
+    "locals":[],
+    "expression":{"nodeId":"all-conditions","typeRef":"bool","kind":"op","operator":"and","args":[
+      {"nodeId":"not-realm-controller","typeRef":"bool","kind":"op","operator":"not","args":[
+        {"nodeId":"realm-controller","typeRef":"bool","kind":"ref","source":"input","path":["realmControllerCommand"]}]},
+      {"nodeId":"not-ai-subject","typeRef":"bool","kind":"op","operator":"and","args":[
+        {"nodeId":"not-ai-workload","typeRef":"bool","kind":"op","operator":"and","args":[
+          {"nodeId":"not-ai-subject-value","typeRef":"bool","kind":"op","operator":"not","args":[
+            {"nodeId":"ai-subject-value","typeRef":"bool","kind":"ref","source":"input","path":["aiSubject"]}]},
+          {"nodeId":"not-ai-workload-value","typeRef":"bool","kind":"op","operator":"not","args":[
+            {"nodeId":"ai-workload-value","typeRef":"bool","kind":"ref","source":"input","path":["aiWorkload"]}]}]},
+        {"nodeId":"approved-and-not-self","typeRef":"bool","kind":"op","operator":"and","args":[
+          {"nodeId":"final-approved","typeRef":"bool","kind":"ref","source":"input","path":["finalApproved"]},
+          {"nodeId":"no-self-approval","typeRef":"bool","kind":"op","operator":"not","args":[
+            {"nodeId":"self-approval","typeRef":"bool","kind":"ref","source":"input","path":["selfApproval"]}]}]}]},
+      {"nodeId":"approver-threshold","typeRef":"bool","kind":"op","operator":"or","args":[
+        {"nodeId":"not-high-risk-profile","typeRef":"bool","kind":"op","operator":"not","args":[
+          {"nodeId":"high-risk-profile","typeRef":"bool","kind":"ref","source":"input","path":["requiresTwoApprovers"]}]},
+        {"nodeId":"two-distinct-approvers","typeRef":"bool","kind":"ref","source":"input","path":["hasTwoDistinctApprovers"]}]}
+    ]}
+  }
+}

@@ -4,6 +4,7 @@ use std::{fs::{File, OpenOptions}, io::{self, Read, Write}, os::unix::fs::{Metad
 use cityos_zen_contracts::PolicyError;
 use rustix::fs::{self, Mode, OFlags, ResolveFlags};
 use serde::Deserialize;
+use crate::json_object::Object;
 use crate::{RegisteredProfile, RegisteredResources, TrustedLauncher};
 
 const MAX_CONTROL: usize = 16_384;
@@ -17,7 +18,7 @@ struct Control {
     cgroup_path: String,
     cgroup_device: u64,
     cgroup_inode: u64,
-    profile: Profile,
+    profile: Object<Profile>,
 }
 
 #[derive(Deserialize)]
@@ -75,9 +76,8 @@ fn read_frame(input: &mut impl Read, limit: usize) -> Result<Vec<u8>, PolicyErro
 pub(crate) fn run() -> Result<(), PolicyError> {
     if std::env::vars_os().next().is_some() { return Err(PolicyError::Evaluation); }
     let mut input = io::stdin().lock();
-    let control: Control = serde_json::from_slice(&read_frame(&mut input, MAX_CONTROL)?)
-        .map_err(|_| PolicyError::InvalidInput)?;
-    let p = control.profile;
+    let control = decode_control(&read_frame(&mut input, MAX_CONTROL)?)?;
+    let p = control.profile.0;
     let profile = RegisteredProfile::new(&p.version, p.cpu_quota_usec, p.cpu_period_usec,
         p.memory_bytes, p.swap_bytes, p.tasks, p.max_request_bytes, p.max_response_bytes,
         Duration::from_millis(p.deadline_ms), Duration::from_millis(p.cleanup_deadline_ms), p.cleanup_polls)?;
@@ -97,6 +97,12 @@ pub(crate) fn run() -> Result<(), PolicyError> {
     io::stdout().lock().write_all(&response).map_err(|_| PolicyError::Evaluation)
 }
 
+fn decode_control(bytes: &[u8]) -> Result<Control, PolicyError> {
+    let Object(control): Object<Control> =
+        serde_json::from_slice(bytes).map_err(|_| PolicyError::InvalidInput)?;
+    Ok(control)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +114,37 @@ mod tests {
         assert!(read_frame(&mut &b"\0\0\0\x04abc"[..], 4).is_err());
         assert!(read_frame(&mut &b"\0\0\0\x04abcd"[..], 3).is_err());
         assert!(read_frame(&mut &b"\0\0\0\0"[..], 3).is_err());
+    }
+
+    #[test]
+    fn launcher_control_and_nested_profile_require_objects() -> Result<(), Box<dyn std::error::Error>> {
+        let valid = serde_json::json!({
+            "artifactPath":"/run/artifact",
+            "artifactSha256":"a",
+            "selectorSha256":"b",
+            "cgroupPath":"/sys/fs/cgroup/worker",
+            "cgroupDevice":1,
+            "cgroupInode":2,
+            "profile":{
+                "version":"profile-v1",
+                "cpuQuotaUsec":1000,
+                "cpuPeriodUsec":1000,
+                "memoryBytes":1024,
+                "swapBytes":0,
+                "tasks":1,
+                "maxRequestBytes":1,
+                "maxResponseBytes":1,
+                "deadlineMs":1,
+                "cleanupDeadlineMs":1,
+                "cleanupPolls":1
+            }
+        });
+        assert!(decode_control(&serde_json::to_vec(&valid)?).is_ok());
+        assert!(decode_control(b"[]").is_err());
+        let mut array_profile = valid;
+        array_profile["profile"] = serde_json::json!([]);
+        assert!(decode_control(&serde_json::to_vec(&array_profile)?).is_err());
+        Ok(())
     }
 
     #[test]

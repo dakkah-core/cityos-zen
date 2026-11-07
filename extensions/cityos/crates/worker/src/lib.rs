@@ -13,6 +13,8 @@ mod cgroup_limits;
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod inherited_fds;
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
+mod json_object;
+#[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod launcher;
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod registered_launcher_stdio;

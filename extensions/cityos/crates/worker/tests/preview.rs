@@ -527,6 +527,10 @@ fn explicit_preview_round_trips_without_receipt_or_authority(
 fn invalid_or_ambiguous_preview_fails_without_output() -> Result<(), Box<dyn std::error::Error>> {
     let invalid = [
         br#"{"kind":"preview","kind":"preview","source":"secret-value","facts":{}}"#.to_vec(),
+        serde_json::to_vec(&json!(["preview", SOURCE,
+            {"quantity":1,"maxQuantity":2,"authorized":true}]))?,
+        serde_json::to_vec(&json!({"kind":"preview", "source":SOURCE,
+            "facts":[1,2,true]}))?,
         serde_json::to_vec(&json!({"kind":"authority", "source":SOURCE,
             "facts":{"quantity":1,"maxQuantity":2,"authorized":true}}))?,
         vec![b'x'; 131_073],

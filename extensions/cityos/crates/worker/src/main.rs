@@ -3,7 +3,8 @@ use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 use cityos_zen_contracts::{
-    PolicyError, PreviewFacts, S14ConsentPreviewOutcome, S14ConsentPreviewRequest,
+    agora_quantity::Object, PolicyError, PreviewFacts, S14ConsentPreviewOutcome,
+    S14ConsentPreviewRequest,
     S14ConsentPreviewResponse, S14ConsentPreviewState, MAX_DOCUMENT_BYTES,
     S14_CONSENT_PREVIEW_KIND, S14_CONSENT_PREVIEW_PROFILE, S14_CONSENT_SOURCE_SHA256,
 };
@@ -13,6 +14,7 @@ use serde_json::json;
 
 mod s14_rule_preview;
 mod agora_quantity;
+mod json_object;
 
 #[cfg(all(target_os = "linux", not(target_env = "uclibc")))]
 mod cgroup_cleanup;
@@ -40,7 +42,7 @@ const MAX_REQUEST_BYTES: u64 = (MAX_DOCUMENT_BYTES as u64) * 2;
 struct PreviewRequest {
     kind: String,
     source: String,
-    facts: PreviewFacts,
+    facts: Object<PreviewFacts>,
 }
 
 /// The source and input remain strings until each loss-aware decoder runs.
@@ -61,7 +63,7 @@ fn v2_integer_preview() -> Result<(), PolicyError> {
         || bytes.iter().copied().find(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n')) != Some(b'{') {
         return Err(PolicyError::InvalidInput);
     }
-    let request: V2IntegerPreviewRequest = serde_json::from_slice(&bytes)
+    let Object(request): Object<V2IntegerPreviewRequest> = serde_json::from_slice(&bytes)
         .map_err(|_| PolicyError::InvalidInput)?;
     if request.kind != "v2-integer-preview"
         || request.profile != cityos_zen_admission::v2_boolean::INTEGER_PREVIEW_PROFILE
@@ -87,13 +89,13 @@ fn preview() -> Result<(), PolicyError> {
     if bytes.len() as u64 > MAX_REQUEST_BYTES {
         return Err(PolicyError::InvalidInput);
     }
-    let request: PreviewRequest =
+    let Object(request): Object<PreviewRequest> =
         serde_json::from_slice(&bytes).map_err(|_| PolicyError::InvalidInput)?;
     if request.kind != "preview" || request.source.len() > MAX_DOCUMENT_BYTES {
         return Err(PolicyError::InvalidInput);
     }
     let policy = cityos_zen_admission::admit(request.source.as_bytes())?;
-    let result = cityos_zen_runtime::evaluate_preview(&policy, &request.facts)?;
+    let result = cityos_zen_runtime::evaluate_preview(&policy, &request.facts.0)?;
     let response = json!({
         "kind": "preview",
         "allowed": result.allowed,

@@ -19,10 +19,13 @@ pub(crate) const PROFILE_V1: &str = "cityos.zen.s14.sandbox-resources.v1";
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProfileV1 {
+    #[serde(deserialize_with = "crate::json_object::deserialize_object")]
     limits: AggregateLimits,
     max_request_bytes: usize,
     max_response_bytes: usize,
+    #[serde(deserialize_with = "crate::json_object::deserialize_object")]
     deadline: Duration,
+    #[serde(deserialize_with = "crate::json_object::deserialize_object")]
     cleanup_deadline: Duration,
     cleanup_polls: usize,
 }

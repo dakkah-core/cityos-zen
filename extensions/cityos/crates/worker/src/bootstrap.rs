@@ -2,6 +2,7 @@
 use std::{io::{self, IoSliceMut, Read}, mem::MaybeUninit, os::fd::{AsFd, AsRawFd, OwnedFd}};
 use cityos_zen_contracts::PolicyError;
 use rustix::net::{recvmsg, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags};
+use crate::json_object::Object;
 use crate::registered_sandbox::{ProfileV1, PROFILE_V1};
 
 const MAX_FRAME: usize = 4096;
@@ -9,7 +10,11 @@ const TOKEN: u8 = 0x71;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Frame { version: String, profile: ProfileV1 }
+struct Frame {
+    version: String,
+    #[serde(deserialize_with = "crate::json_object::deserialize_object")]
+    profile: ProfileV1,
+}
 
 pub(crate) fn encode(profile: ProfileV1) -> Result<Vec<u8>, PolicyError> {
     let bytes = serde_json::to_vec(&Frame { version: PROFILE_V1.into(), profile })
@@ -67,7 +72,8 @@ fn receive(mut socket: impl Read, fd: &impl AsFd) -> Result<(OwnedFd, OwnedFd, P
 pub(crate) fn token() -> u8 { TOKEN }
 
 fn decode(bytes: &[u8]) -> Result<ProfileV1, PolicyError> {
-    let frame: Frame = serde_json::from_slice(bytes).map_err(|_| PolicyError::Evaluation)?;
+    let Object(frame): Object<Frame> =
+        serde_json::from_slice(bytes).map_err(|_| PolicyError::Evaluation)?;
     if frame.version != PROFILE_V1 { return Err(PolicyError::Evaluation); }
     frame.profile.revalidate().map_err(|_| PolicyError::Evaluation)
 }
@@ -91,6 +97,34 @@ mod tests {
         assert!(decode(text.replace(PROFILE_V1, "other").as_bytes()).is_err());
         assert!(decode(text.replacen("\"version\":", "\"version\":\"bad\",\"version\":", 1).as_bytes()).is_err());
         assert!(decode(format!("{text}{{}}").as_bytes()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_protocol_requires_objects_at_every_structured_level() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = AggregateLimits::new(50_000, 100_000, 1024, 0, 1).map_err(|_| "limits")?;
+        let profile = ProfileV1::new(PROFILE_V1, limits, 256, 512,
+            Duration::from_secs(1), Duration::from_secs(1), 4).map_err(|_| "profile")?;
+        let encoded = encode(profile)?;
+        let valid: serde_json::Value = serde_json::from_slice(&encoded[4..])?;
+        assert!(decode(&encoded[4..]).is_ok());
+        assert!(decode(b"[]").is_err());
+
+        let mut candidate = valid.clone();
+        candidate["profile"] = serde_json::json!([]);
+        assert!(decode(&serde_json::to_vec(&candidate)?).is_err());
+
+        let mut candidate = valid.clone();
+        candidate["profile"]["limits"] = serde_json::json!([]);
+        assert!(decode(&serde_json::to_vec(&candidate)?).is_err());
+
+        let mut candidate = valid.clone();
+        candidate["profile"]["deadline"] = serde_json::json!([]);
+        assert!(decode(&serde_json::to_vec(&candidate)?).is_err());
+
+        let mut candidate = valid;
+        candidate["profile"]["cleanup_deadline"] = serde_json::json!([]);
+        assert!(decode(&serde_json::to_vec(&candidate)?).is_err());
         Ok(())
     }
 

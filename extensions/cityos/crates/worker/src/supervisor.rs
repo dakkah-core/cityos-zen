@@ -11,6 +11,7 @@ use cityos_zen_contracts::{
     PolicyError, S14ConsentPreviewResponse, MAX_SAFE_INTEGER, PROFILE, S14_CONSENT_PREVIEW_KIND,
     S14_CONSENT_PREVIEW_PROFILE, S14_CONSENT_SOURCE_SHA256,
 };
+use crate::json_object::Object;
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::prctl::{get_no_new_privs, set_no_new_privs};
@@ -238,7 +239,7 @@ enum ResponseProfile {
 fn validate_response(bytes: &[u8], profile: ResponseProfile) -> Result<(), PolicyError> {
     match profile {
         ResponseProfile::Cart => {
-            let response: PreviewResponse =
+            let Object(response): Object<PreviewResponse> =
                 serde_json::from_slice(bytes).map_err(|_| PolicyError::Evaluation)?;
             if response.kind != "preview"
                 || response.profile != PROFILE
@@ -263,7 +264,7 @@ fn validate_response(bytes: &[u8], profile: ResponseProfile) -> Result<(), Polic
         }
         ResponseProfile::S14Rule => crate::s14_rule_preview::validate_response(bytes)?,
         ResponseProfile::AgoraQuantity => {
-            let response: AgoraQuantityResponse = serde_json::from_slice(bytes)
+            let Object(response): Object<AgoraQuantityResponse> = serde_json::from_slice(bytes)
                 .map_err(|_| PolicyError::Evaluation)?;
             let digest = |value: &str| value.len() == 64
                 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
@@ -725,13 +726,39 @@ mod tests {
     }
 
     #[test]
-    fn cart_response_still_accepts_the_existing_sequence_representation() {
+    fn cart_response_requires_an_object_not_a_sequence() {
+        let object = format!(
+            r#"{{"kind":"preview","allowed":true,"sourceSha256":"{}","profile":"{}"}}"#,
+            "a".repeat(64),
+            PROFILE,
+        );
+        assert!(validate_response(object.as_bytes(), ResponseProfile::Cart).is_ok());
+
         let response = format!(
             "[\"preview\",true,\"{}\",\"{}\"]",
             "a".repeat(64),
             PROFILE,
         );
-        assert!(validate_response(response.as_bytes(), ResponseProfile::Cart).is_ok());
+        assert!(validate_response(response.as_bytes(), ResponseProfile::Cart).is_err());
+    }
+
+    #[test]
+    fn agora_quantity_response_requires_an_object_not_a_sequence() {
+        let object = format!(
+            r#"{{"kind":"agora-cart-quantity","profile":"cityos.zen.agora-cart-quantity.v1","executionProfile":"{}","sourceSha256":"{}","ruleId":"rule-1","revisionDigest":"sha256:{}","matchingQuantity":1,"maxQuantity":2,"withinLimit":true}}"#,
+            cityos_zen_contracts::agora_quantity::EXECUTION_PROFILE.id,
+            "a".repeat(64),
+            "b".repeat(64),
+        );
+        assert!(validate_response(object.as_bytes(), ResponseProfile::AgoraQuantity).is_ok());
+
+        let sequence = format!(
+            "[\"agora-cart-quantity\",\"cityos.zen.agora-cart-quantity.v1\",\"{}\",\"{}\",\"rule-1\",\"sha256:{}\",1,2,true]",
+            cityos_zen_contracts::agora_quantity::EXECUTION_PROFILE.id,
+            "a".repeat(64),
+            "b".repeat(64),
+        );
+        assert!(validate_response(sequence.as_bytes(), ResponseProfile::AgoraQuantity).is_err());
     }
 
     #[test]

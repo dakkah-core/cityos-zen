@@ -7,6 +7,18 @@ Agora policy revision, a decision receipt, an owner contract, or production
 evidence. Its safe-integer comparison is a bounded subset of the current Agora
 `max_quantity` rule; it does not yet model SKU selection or owner transactions.
 
+`tryton-sod-source-profile.json` is a fixed, source-derived Boolean V2 fixture.
+`tryton-sod-source-cases.json` links its regression cases to the inspected
+`cityos-core-tryton` source commit, Git blob and SHA-256. The cases exercise the
+current `packages/tryton-sod-policy/src/index.ts` predicates through the public
+Zen V2 typed profile after bounded host normalization of actor and approver
+identities. This is an extension-local evaluator foundation, not an approved
+Tryton or CityOS policy contract. Tryton remains the semantic and final business
+owner; the calculation neither verifies evidence nor authorizes, issues
+receipts, activates policy, or causes effects. Inputs are capped at 64 KiB,
+1,024 approvers and 4,096 UTF-8 bytes per identity; excess or malformed facts
+are errors, never a positive result.
+
 `s14-decision-baseline.json` describes synthetic inputs and expected results for
 the recorded S14 TypeScript source blob. `scripts/corpus/verify-s14.test.mjs`
 executes that actual implementation against every case and rejects source drift.
