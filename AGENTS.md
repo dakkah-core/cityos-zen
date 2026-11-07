@@ -13,4 +13,8 @@ Keep existing CMS behavior until its owner-specific transfer, contract parity, m
 
 ## Upstream fork role
 
-This repository maintains the CityOS fork connected to `gorules/zen`. Keep the upstream remote and genuine merge ancestry. The shared.policy product and its CityOS runtime belong in `cityos-shared-policy`, which consumes this fork as a pinned `vendor/zen` submodule. Make policy-specific contracts and adapters there; change Zen core only for a qualified public API gap recorded by the policy repository's patch ledger.
+This repository maintains the CityOS fork connected to `gorules/zen`. Keep the upstream remote and genuine merge ancestry. The shared.policy product and its CityOS runtime belong in `cityos-shared-policy`, which consumes this fork as a pinned `vendor/zen` submodule. Keep CityOS fork extensions under the protected `extensions/cityos` path, separate from upstream-owned core. Make policy-specific domain, host, persistence, and management code in the Policy repo; change Zen core only for a qualified public API gap recorded by the Policy patch ledger.
+
+## Upstream preservation invariants
+
+Preserve origin as the CityOS fork and upstream as gorules/zen. Record the exact integrated upstream commit in the trusted integration manifest and retain genuine merge ancestry. Before integrating upstream changes, reject unexpected repository or source identity, unqualified source state, protected-path deletion, rename or mode changes, symlink escapes, and incoming upstream collisions with CityOS-owned extensions/cityos. Run the preservation checker and required fork and consumer qualification against the exact candidate. Keep CityOS extensions under extensions/cityos and separate from upstream-owned core. Do not use blanket merge=ours rules or hide core divergence.
