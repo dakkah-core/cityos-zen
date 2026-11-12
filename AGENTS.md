@@ -18,3 +18,12 @@ This repository maintains the CityOS fork connected to `gorules/zen`. Keep the u
 ## Upstream preservation invariants
 
 Preserve origin as the CityOS fork and upstream as gorules/zen. Record the exact integrated upstream commit in the trusted integration manifest and retain genuine merge ancestry. Before integrating upstream changes, reject unexpected repository or source identity, unqualified source state, protected-path deletion, rename or mode changes, symlink escapes, and incoming upstream collisions with CityOS-owned extensions/cityos. Run the preservation checker and required fork and consumer qualification against the exact candidate. Keep CityOS extensions under extensions/cityos and separate from upstream-owned core. Do not use blanket merge=ours rules or hide core divergence.
+
+## Compiler and generated-output verification
+
+For changes to a compiler, generator, template, generated code, or its consuming application:
+- Validate canonical inputs and semantic rules before generation. Generate from explicit, pinned inputs into a clean destination and retain a manifest linking outputs to their inputs and templates.
+- Run the native compiler, type checker, and linter for each emitted language, including selected consuming applications and handwritten extension points.
+- Run Semgrep CE on explicit source and output paths with metrics disabled and reviewed local rules. Record tool and ruleset versions, scanned paths, exclusions, and findings; keep positive and negative fixtures for CityOS rules.
+- Run selected Skylos checks with uploads, cloud, and AI modes disabled. Record the tool version, checks, scope, and coverage. Treat unqualified findings as review leads until the check has positive and negative fixtures and an owner-reviewed policy.
+- Report exact commands and results. Zero-file, partial, or skipped required coverage is not a clean pass; scanner output alone does not prove security or behavior.
