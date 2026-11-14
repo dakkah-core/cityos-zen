@@ -17,3 +17,4 @@ yarn-error.log
 
 # Local CityOS tooling state
 /.cityos/
+.playwright-mcp/*
